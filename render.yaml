@@ -21,3 +21,31 @@ services:
     #   name: vibecamp-data
     #   mountPath: /data
     #   sizeGB: 1
+
+  # Chat bots. Same Docker image as the web service; the role is selected by
+  # VIBECAMP_ROLE (see Dockerfile). Each needs its bot token as a secret
+  # (sync: false -> fill it in the dashboard, never commit it). Both read the
+  # schedule from the hosted REST API via VIBECAMP_API_BASE.
+  - type: worker
+    name: vibecamp-discord
+    runtime: docker
+    plan: free
+    envVars:
+      - key: VIBECAMP_ROLE
+        value: discord
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: VIBECAMP_API_BASE
+        value: https://vibecamp-expansion-production.up.railway.app
+
+  - type: worker
+    name: vibecamp-telegram
+    runtime: docker
+    plan: free
+    envVars:
+      - key: VIBECAMP_ROLE
+        value: telegram
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: VIBECAMP_API_BASE
+        value: https://vibecamp-expansion-production.up.railway.app

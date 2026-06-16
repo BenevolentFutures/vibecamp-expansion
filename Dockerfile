@@ -17,6 +17,13 @@ RUN mkdir -p /data
 
 EXPOSE 8787
 
-# One process serves REST + static exports + remote MCP, and runs the crawler
-# loop in a background thread. Honors the host-provided $PORT.
-CMD ["sh", "-c", "uvicorn vibecamp_expansion.asgi:app --host 0.0.0.0 --port ${PORT:-8787}"]
+# One image, three roles — selected by $VIBECAMP_ROLE so each Railway service
+# is just this image plus an env var (no per-service start-command needed):
+#   web (default) -> REST + static + remote MCP + crawler thread (honors $PORT)
+#   discord       -> the Discord bot   (needs $DISCORD_BOT_TOKEN)
+#   telegram      -> the Telegram bot  (needs $TELEGRAM_BOT_TOKEN)
+CMD ["sh", "-c", "case \"${VIBECAMP_ROLE:-web}\" in \
+  discord) exec vibecamp discord ;; \
+  telegram) exec vibecamp telegram ;; \
+  *) exec uvicorn vibecamp_expansion.asgi:app --host 0.0.0.0 --port ${PORT:-8787} ;; \
+esac"]

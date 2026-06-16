@@ -227,6 +227,69 @@ label for upstream `bookmarks`).
 | `VIBECAMP_API_BASE` | hosted Railway app | Point at a local `vibecamp serve` for dev. |
 | `DISCORD_GUILD_ID` | — | Optional; instant per-guild command sync during dev. |
 
+## Telegram bot
+
+A read-only Telegram bot for **one-on-one chat**. It mirrors the Discord
+commands and, crucially, treats any plain-text direct message as a
+recommendation query — a person can just DM it "live music and art" and get a
+curated list back. Same shared API client as the Discord bot (`bot_api.py`).
+
+```bash
+pip install -e ".[telegram]"
+export TELEGRAM_BOT_TOKEN=...   # from @BotFather (never commit this)
+vibecamp telegram
+```
+
+Commands: `/start` · `/help` · `/events <text>` · `/pool` · `/shanties` ·
+`/day <YYYY-MM-DD>` · `/popular` · `/recommend <interest>` · `/event <id>`,
+plus **any plain message → recommendations**.
+
+### Creating the Telegram bot
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather) → `/newbot`,
+   choose a name and username.
+2. BotFather replies with a token — set it as `TELEGRAM_BOT_TOKEN`. **Treat it
+   like a password; never commit it.**
+3. (Optional) `/setcommands` in BotFather, pasting the command list above, so
+   they autocomplete in the chat.
+4. Run `vibecamp telegram`. Open a DM with your bot and say hi.
+
+## Hosting the bots (Railway / Render)
+
+Both bots are long-running workers (a persistent connection, not a web
+request), so they run as **separate services** alongside the web service. To
+keep one Docker image for everything, the container picks its role from
+`VIBECAMP_ROLE` (see the `Dockerfile`):
+
+| Service | `VIBECAMP_ROLE` | Required secret | Other env |
+|---|---|---|---|
+| web (REST + MCP + crawler) | `web` (default) | — | `VIBECAMP_DATA_DIR=/data` |
+| Discord bot | `discord` | `DISCORD_BOT_TOKEN` | `VIBECAMP_API_BASE=<web URL>` |
+| Telegram bot | `telegram` | `TELEGRAM_BOT_TOKEN` | `VIBECAMP_API_BASE=<web URL>` |
+
+**Railway** — add one service per bot from this repo, then set its variables:
+
+```bash
+# Discord worker (same repo + image, role via env var):
+railway add --service vibecamp-discord --repo BenevolentFutures/vibecamp-expansion \
+  --variables VIBECAMP_ROLE=discord \
+  --variables DISCORD_BOT_TOKEN=xxxxx \
+  --variables VIBECAMP_API_BASE=https://vibecamp-expansion-production.up.railway.app
+
+# Telegram worker:
+railway add --service vibecamp-telegram --repo BenevolentFutures/vibecamp-expansion \
+  --variables VIBECAMP_ROLE=telegram \
+  --variables TELEGRAM_BOT_TOKEN=xxxxx \
+  --variables VIBECAMP_API_BASE=https://vibecamp-expansion-production.up.railway.app
+```
+
+Because the role is just an env var, no per-service start command is needed.
+The bots have no inbound HTTP, so they don't need a public domain.
+
+**Render** — the workers are already declared in `render.yaml` (`type: worker`);
+fill in each token (marked `sync: false`) in the dashboard after the blueprint
+syncs.
+
 ## Keeping it fresh
 
 Run the crawler continuously (`vibecamp crawl --loop`) or on a scheduler. A
