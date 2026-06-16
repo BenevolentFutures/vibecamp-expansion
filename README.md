@@ -10,6 +10,27 @@ project crawls that feed on a schedule into a local cache and serves it back as:
 - a **clean, filterable REST API** (FastAPI, with auto-generated OpenAPI), and
 - an **MCP server** so any agent can query the schedule conversationally.
 
+## Point your agent at it (10 seconds)
+
+Live endpoint: **https://vibecamp-expansion-production.up.railway.app** — visit it
+in a browser for copy-paste setup, or:
+
+**Claude Code** — one command, then just chat:
+```bash
+claude mcp add --transport http vibecamp https://vibecamp-expansion-production.up.railway.app/mcp/
+```
+
+**Claude Desktop · Cursor · OpenClaw · any MCP client** — add to your config:
+```json
+{ "mcpServers": { "vibecamp": { "url": "https://vibecamp-expansion-production.up.railway.app/mcp/" } } }
+```
+
+Then talk to it: *"What's on at the Pool Saturday night?"*, *"I'm into consciousness
+and AI — what should I go to?"*, *"Find the sea shanties."* Each result links into
+my.vibe.camp so you can star / RSVP natively.
+
+No agent? `curl https://vibecamp-expansion-production.up.railway.app/data/events.ndjson` and grep.
+
 ## What it does well
 
 - **Lifecycle-aware crawling.** Each crawl does a full reconciliation: new

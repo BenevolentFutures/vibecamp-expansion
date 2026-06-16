@@ -22,8 +22,8 @@ import logging
 import os
 import threading
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -32,6 +32,7 @@ from . import __version__, config
 # /data static mount. We attach a lifespan and graft the MCP endpoint onto it.
 from .api import app
 from .crawler import crawl_loop
+from .landing import landing_html
 from .mcp_server import mcp
 from .store import Store
 
@@ -92,21 +93,29 @@ app.router.lifespan_context = lifespan
 
 
 @app.get("/", include_in_schema=False)
-async def root() -> JSONResponse:
-    return JSONResponse(
-        {
-            "service": "vibecamp-expansion",
-            "version": __version__,
-            "edition": config.CURRENT_EDITION_NAME,
-            "endpoints": {
-                "rest_api": "/events  (OpenAPI at /docs, /openapi.json)",
-                "static_exports": "/data/  (index.json, events.ndjson, schedule.md, llms.txt, …)",
-                "remote_mcp": "/mcp/  (streamable-http transport)",
-                "health": "/health",
-            },
-            "agent_quickstart": "Fetch /data/llms.txt, then grep /data/events.ndjson.",
-        }
-    )
+async def root(request: Request):
+    """Human browsers get a connect-your-agent landing page; agents get JSON."""
+    base = str(request.base_url).rstrip("/")
+    info = {
+        "service": "vibecamp-expansion",
+        "version": __version__,
+        "edition": config.CURRENT_EDITION_NAME,
+        "endpoints": {
+            "rest_api": "/events  (OpenAPI at /docs, /openapi.json)",
+            "static_exports": "/data/  (index.json, events.ndjson, schedule.md, llms.txt, …)",
+            "remote_mcp": f"{base}/mcp/  (streamable-http transport)",
+            "health": "/health",
+        },
+        "connect": {
+            "claude_code": f"claude mcp add --transport http vibecamp {base}/mcp/",
+            "mcp_config": {"mcpServers": {"vibecamp": {"url": f"{base}/mcp/"}}},
+        },
+        "agent_quickstart": "Fetch /data/llms.txt, then grep /data/events.ndjson.",
+    }
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        return HTMLResponse(landing_html(base, config.CURRENT_EDITION_NAME))
+    return JSONResponse(info)
 
 
 # Friendly redirect so clients configured with the bare /mcp still reach the
