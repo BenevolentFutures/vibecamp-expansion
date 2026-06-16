@@ -247,6 +247,8 @@ def build_bot(api: VibecampAPI, *, guild_id: Optional[int] = None):
 
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
+    # Expose the command tree on the client for sync/introspection.
+    client.tree = tree
     guild = discord.Object(id=guild_id) if guild_id else None
 
     async def _first_festival_day() -> Optional[str]:
