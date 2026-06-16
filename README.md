@@ -166,6 +166,67 @@ vibecamp stats
 }
 ```
 
+## Discord bot
+
+A read-only Discord bot exposes the schedule as slash commands. It is a thin
+client over the REST API above — it holds no state and never writes upstream.
+It ships as an optional extra so it doesn't weigh down the core install.
+
+```bash
+pip install -e ".[discord]"
+export DISCORD_BOT_TOKEN=...          # from the Discord Developer Portal (never commit this)
+# export VIBECAMP_API_BASE=https://vibecamp-expansion-production.up.railway.app  # default
+# export DISCORD_GUILD_ID=123456789   # optional: instant slash-command sync to one guild
+vibecamp discord
+```
+
+### Slash commands
+
+| Command | What |
+|---|---|
+| `/events query:<text>` | Full-text search; top results by stars |
+| `/pool` | Events at the Pool venue |
+| `/shanties` | Find the sea shanties |
+| `/day date:<YYYY-MM-DD>` | Events on a day (defaults to the first festival day) |
+| `/popular` | Top events by stars |
+| `/recommend interest:<text>` | Curated picks — searches each word of the interest, unions, de-dups, ranks by stars |
+| `/event id:<event_id>` | Full detail for one event (ids appear in list results) |
+
+Each list shows name, day + `HH:MM`, venue, and **stars** (the my.vibe.camp
+label for upstream `bookmarks`).
+
+### Creating the Discord application
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
+   → **New Application**, name it (e.g. "Vibe Camp").
+2. Open the **Bot** tab → **Add Bot**. Click **Reset Token** to reveal the
+   token and set it as `DISCORD_BOT_TOKEN`. **Treat it like a password — never
+   commit it.**
+3. No privileged intents are required. The bot only uses the default `guilds`
+   intent (slash commands), so you can leave Presence / Server Members /
+   Message Content **off**.
+4. Invite the bot to your server with the **`bot`** and **`applications.commands`**
+   scopes. Build the URL from your application's Client ID:
+
+   ```
+   https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applications.commands&permissions=0
+   ```
+
+   (`permissions=0` is fine — the bot only posts embeds in response to slash
+   commands.) Or use the Developer Portal's **OAuth2 → URL Generator** with the
+   same two scopes.
+5. Run `vibecamp discord`. With `DISCORD_GUILD_ID` set, commands appear in that
+   guild immediately; without it, global commands can take up to an hour to
+   propagate.
+
+### Bot environment variables
+
+| Var | Default | Notes |
+|---|---|---|
+| `DISCORD_BOT_TOKEN` | — | **Required.** From the Developer Portal. |
+| `VIBECAMP_API_BASE` | hosted Railway app | Point at a local `vibecamp serve` for dev. |
+| `DISCORD_GUILD_ID` | — | Optional; instant per-guild command sync during dev. |
+
 ## Keeping it fresh
 
 Run the crawler continuously (`vibecamp crawl --loop`) or on a scheduler. A

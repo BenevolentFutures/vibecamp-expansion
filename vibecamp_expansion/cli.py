@@ -48,6 +48,12 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_discord(args: argparse.Namespace) -> int:
+    from .discord_bot import run as discord_run
+
+    return discord_run()
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     store = Store()
     print(json.dumps(store.stats(), indent=2))
@@ -82,6 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pm = sub.add_parser("mcp", help="Run the MCP server (stdio).")
     pm.set_defaults(func=cmd_mcp)
+
+    pd = sub.add_parser(
+        "discord",
+        help="Run the Discord bot (needs DISCORD_BOT_TOKEN; install '.[discord]').",
+    )
+    pd.set_defaults(func=cmd_discord)
 
     pt = sub.add_parser("stats", help="Print schedule + crawl statistics.")
     pt.set_defaults(func=cmd_stats)
