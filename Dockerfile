@@ -5,7 +5,9 @@ WORKDIR /app
 # Install deps first for layer caching.
 COPY pyproject.toml README.md ./
 COPY vibecamp_expansion ./vibecamp_expansion
-RUN pip install --no-cache-dir .
+# Install the bot extras too: the same image backs the web service and the
+# Discord/Telegram worker services on Railway (each just runs a different CMD).
+RUN pip install --no-cache-dir ".[discord,telegram]"
 
 # Cache + static exports live here; mount a volume for persistent history.
 ENV VIBECAMP_DATA_DIR=/data \

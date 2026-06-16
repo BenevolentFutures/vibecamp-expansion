@@ -54,6 +54,12 @@ def cmd_discord(args: argparse.Namespace) -> int:
     return discord_run()
 
 
+def cmd_telegram(args: argparse.Namespace) -> int:
+    from .telegram_bot import run as telegram_run
+
+    return telegram_run()
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     store = Store()
     print(json.dumps(store.stats(), indent=2))
@@ -94,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the Discord bot (needs DISCORD_BOT_TOKEN; install '.[discord]').",
     )
     pd.set_defaults(func=cmd_discord)
+
+    pg = sub.add_parser(
+        "telegram",
+        help="Run the Telegram bot (needs TELEGRAM_BOT_TOKEN; install '.[telegram]').",
+    )
+    pg.set_defaults(func=cmd_telegram)
 
     pt = sub.add_parser("stats", help="Print schedule + crawl statistics.")
     pt.set_defaults(func=cmd_stats)

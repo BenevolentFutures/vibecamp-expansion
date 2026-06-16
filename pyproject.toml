@@ -21,6 +21,9 @@ dev = [
 discord = [
     "discord.py>=2.3",
 ]
+telegram = [
+    "python-telegram-bot>=21.0",
+]
 
 [project.scripts]
 vibecamp = "vibecamp_expansion.cli:main"
