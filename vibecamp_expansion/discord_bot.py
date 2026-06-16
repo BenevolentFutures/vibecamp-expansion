@@ -31,9 +31,9 @@ from .bot_api import (
     event_stars,
     event_time,
     event_venue,
-    recommend,
     truncate,
 )
+from .bot_llm import curate
 
 logger = logging.getLogger(__name__)
 
@@ -200,16 +200,17 @@ def build_bot(api: VibecampAPI, *, guild_id: Optional[int] = None):
     @app_commands.describe(interest="Anything you're into, e.g. 'live music and art'.")
     async def recommend_cmd(interaction, interest: str) -> None:  # noqa: ANN001
         await interaction.response.defer()
-        results = await recommend(api, interest)
+        curated = await curate(api, interest)
+        results = curated["events"]
         embed = _new_list_embed(
             f"Picks for: {truncate(interest, 200)}",
             results,
             empty="Couldn't find anything matching that. Try a broader interest.",
         )
         if results:
-            embed.description = (
+            embed.description = curated["framing"] or (
                 f"Top {len(results)} events for someone into "
-                f"“{truncate(interest, 100)}”, sorted by stars."
+                f"“{truncate(interest, 100)}”."
             )
         await interaction.followup.send(embed=embed)
 

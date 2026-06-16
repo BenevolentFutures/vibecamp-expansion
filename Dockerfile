@@ -5,9 +5,12 @@ WORKDIR /app
 # Install deps first for layer caching.
 COPY pyproject.toml README.md ./
 COPY vibecamp_expansion ./vibecamp_expansion
-# Install the bot extras too: the same image backs the web service and the
-# Discord/Telegram worker services on Railway (each just runs a different CMD).
-RUN pip install --no-cache-dir ".[discord,telegram]"
+# tzdata lets $TZ resolve so the bots reckon "next event" in festival-local
+# wall-clock time. Install the bot extras too: the same image backs the web
+# service and the Discord/Telegram worker services (each runs a different CMD).
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir ".[discord,telegram]"
 
 # Cache + static exports live here; mount a volume for persistent history.
 ENV VIBECAMP_DATA_DIR=/data \

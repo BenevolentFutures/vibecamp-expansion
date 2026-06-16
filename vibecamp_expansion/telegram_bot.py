@@ -30,9 +30,9 @@ from .bot_api import (
     event_stars,
     event_time,
     event_venue,
-    recommend,
     truncate,
 )
+from .bot_llm import curate
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,8 @@ def build_app(api: VibecampAPI, token: str):
         await _recommend_reply(update, interest)
 
     async def _recommend_reply(update, interest: str) -> None:
-        results = await recommend(api, interest)
+        curated = await curate(api, interest)
+        results = curated["events"]
         if not results:
             await _reply(
                 update,
@@ -208,7 +209,7 @@ def build_app(api: VibecampAPI, token: str):
                 "or /help for commands.",
             )
             return
-        title = f"Picks for: {truncate(interest, 100)}"
+        title = curated["framing"] or f"Picks for: {truncate(interest, 100)}"
         await _reply(update, _render_list(title, results, empty=""))
 
     app = Application.builder().token(token).post_shutdown(_post_shutdown).build()

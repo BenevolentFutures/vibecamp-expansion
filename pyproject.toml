@@ -20,9 +20,11 @@ dev = [
 ]
 discord = [
     "discord.py>=2.3",
+    "anthropic>=0.49",
 ]
 telegram = [
     "python-telegram-bot>=21.0",
+    "anthropic>=0.49",
 ]
 
 [project.scripts]
