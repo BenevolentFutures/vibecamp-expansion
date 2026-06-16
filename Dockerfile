@@ -25,5 +25,6 @@ EXPOSE 8787
 CMD ["sh", "-c", "case \"${VIBECAMP_ROLE:-web}\" in \
   discord) exec vibecamp discord ;; \
   telegram) exec vibecamp telegram ;; \
-  *) exec uvicorn vibecamp_expansion.asgi:app --host 0.0.0.0 --port ${PORT:-8787} ;; \
+  *) exec uvicorn vibecamp_expansion.asgi:app --host 0.0.0.0 --port ${PORT:-8787} \
+       --proxy-headers --forwarded-allow-ips='*' ;; \
 esac"]
