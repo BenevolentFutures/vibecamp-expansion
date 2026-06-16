@@ -77,6 +77,14 @@ def crawl_once(store: Store, client: Optional[httpx.Client] = None) -> dict[str,
         event_count=len(normalized),
         counts=counts,
     )
+
+    if config.EXPORT_ON_CRAWL:
+        try:
+            from .export import generate_exports
+
+            generate_exports(store)
+        except Exception as exc:  # noqa: BLE001 — exports are best-effort
+            log.warning("export generation failed: %s", exc)
     summary = {
         "crawl_id": crawl_id,
         "fetched": len(raw_events),

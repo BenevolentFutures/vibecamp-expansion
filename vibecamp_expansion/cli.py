@@ -54,6 +54,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    from .export import generate_exports
+
+    manifest = generate_exports(Store())
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vibecamp", description="Vibe Camp Expansion toolkit")
     p.add_argument("--version", action="version", version=f"vibecamp-expansion {__version__}")
@@ -77,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pt = sub.add_parser("stats", help="Print schedule + crawl statistics.")
     pt.set_defaults(func=cmd_stats)
+
+    pe = sub.add_parser("export", help="Regenerate static export files from the cache.")
+    pe.set_defaults(func=cmd_export)
 
     return p
 

@@ -62,10 +62,26 @@ vibecamp_expansion/
   normalize.py    raw upstream payload -> normalized event (+ content_hash)
   store.py        SQLite + FTS5; reconcile(), history, crawl_log, queries
   crawler.py      fetch + reconcile; crawl_once / crawl_loop
-  api.py          FastAPI REST (auto OpenAPI at /docs)
-  mcp_server.py   FastMCP tools
-  cli.py          vibecamp crawl|serve|mcp|stats
+  api.py          FastAPI REST (auto OpenAPI at /docs) + /data static mount
+  mcp_server.py   FastMCP tools (stdio locally; mounted at /mcp/ when hosted)
+  export.py       static grep-friendly files (events.ndjson, schedule.md, llms.txt, …)
+  asgi.py         DEPLOY ENTRY: one app = REST + /data + remote MCP + crawler thread
+  cli.py          vibecamp crawl|serve|mcp|stats|export
 ```
+
+## Three consumption tiers (all from one crawler/cache)
+
+1. **Static files** (`export.py` → served at `/data`): an agent fetches one
+   file and greps/jq's locally. Most resilient, zero API. Regenerated every
+   crawl. This is the primary agent interface for bulk use.
+2. **REST API** (`api.py`): server-side filter/search.
+3. **Remote MCP** (`mcp_server.py` mounted at `/mcp/` by `asgi.py`): turnkey
+   URL for MCP clients. Stateless streamable-http transport.
+
+Deploy = `vibecamp_expansion.asgi:app` (Dockerfile / render.yaml / Procfile).
+The MCP transport mounts at `/mcp/` with `streamable_http_path="/"` (mounting
+the default `/mcp`-rooted app at `/mcp` would yield `/mcp/mcp` — don't). A
+slash-less `/mcp` 307-redirects to `/mcp/`.
 
 ## Conventions
 

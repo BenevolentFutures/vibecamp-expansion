@@ -24,6 +24,15 @@ DATA_DIR = Path(
 
 DB_PATH = Path(os.environ.get("VIBECAMP_DB_PATH", str(DATA_DIR / "vibecamp.db"))).expanduser()
 
+# Static, grep-friendly export files (events.ndjson, schedule.md, llms.txt, …).
+# Regenerated on every successful crawl and served at /data by the API.
+EXPORT_DIR = Path(
+    os.environ.get("VIBECAMP_EXPORT_DIR", str(DATA_DIR / "public"))
+).expanduser()
+
+# Whether the crawler regenerates static exports after each successful pass.
+EXPORT_ON_CRAWL = os.environ.get("VIBECAMP_EXPORT_ON_CRAWL", "1") not in ("0", "false", "no")
+
 # Crawl cadence (seconds) for the built-in loop runner.
 CRAWL_INTERVAL_SECONDS = int(os.environ.get("VIBECAMP_CRAWL_INTERVAL", "300"))
 

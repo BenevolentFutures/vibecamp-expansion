@@ -1,0 +1,23 @@
+# Render blueprint. Connect this repo at https://dashboard.render.com → New →
+# Blueprint, or `render blueprint launch`. Serves REST + static + remote MCP.
+#
+# NOTE: Render's free web tier sleeps after ~15 min of no inbound traffic,
+# which also pauses the in-process crawler. For an always-fresh crawler use a
+# paid instance, or a host that doesn't sleep (Railway/Fly), or run the crawler
+# externally (e.g. on an always-on box) and set VIBECAMP_DISABLE_CRAWLER=1 here.
+services:
+  - type: web
+    name: vibecamp-expansion
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: VIBECAMP_DATA_DIR
+        value: /data
+      - key: VIBECAMP_CRAWL_INTERVAL
+        value: "300"
+    # Uncomment for persistent history across restarts (paid feature):
+    # disk:
+    #   name: vibecamp-data
+    #   mountPath: /data
+    #   sizeGB: 1

@@ -34,18 +34,82 @@ project crawls that feed on a schedule into a local cache and serves it back as:
   suffix; we treat them as naive wall-clock and never timezone-convert.
 - **Full-text search** over name/description/location/creator (SQLite FTS5).
 
+## Three ways to consume it
+
+| Tier | Best for | How |
+|---|---|---|
+| **Static files** (`/data/*`) | agents that fetch once and grep/jq locally; max resilience | `curl …/data/events.ndjson` |
+| **REST API** | server-side filtering & search | `GET …/events?q=music&day=2026-06-19` |
+| **Remote MCP** | turnkey "add a URL" in Claude/Cursor | point client at `…/mcp/` |
+
+All three are fed by one crawler and one SQLite cache.
+
 ## Architecture
 
 ```
 upstream /api/v1/events
-        │  (every ~5 min)
+        │  (every ~5 min, in-process thread)
         ▼
-   crawler.py ── reconcile ──► SQLite cache (store.py)
-                                 │  events + event_history + crawl_log + FTS5
-                    ┌────────────┴────────────┐
-                    ▼                          ▼
-             api.py (FastAPI REST)     mcp_server.py (MCP tools)
+   crawler.py ── reconcile ──► SQLite cache (store.py) ──► export.py (static files)
+                                 │  events + history + crawl_log + FTS5
+        ┌────────────────────────┼───────────────────────────┬─────────────┐
+        ▼                        ▼                           ▼             ▼
+  api.py (REST)         mcp_server.py (MCP tools)     /data static     export files
+                                                                       (events.ndjson,
+   all served by one ASGI app: vibecamp_expansion.asgi:app             schedule.md, …)
 ```
+
+## Static exports (the grep layer)
+
+Every crawl regenerates a set of flat files under `/data` (and `vibecamp export`
+writes them locally). An agent can fetch one file and work entirely offline:
+
+| File | What |
+|---|---|
+| `index.json` | manifest: generated_at, edition, counts, file list |
+| `llms.txt` | plain-text guide for agents (start here) |
+| `events.ndjson` | one event JSON per line (current edition) — `curl … \| jq`/`grep` |
+| `events.json` | single JSON object with metadata |
+| `schedule.md` | day-grouped, human + agent readable |
+| `events.csv` | spreadsheet-friendly flat table |
+| `events.ics` | iCalendar feed |
+| `events.all.ndjson` / `events.all.json` | every edition (2024/25/26) |
+
+```bash
+# Everything an agent needs, no API:
+curl -s https://HOST/data/events.ndjson | jq 'select(.location=="Pool")'
+curl -s https://HOST/data/schedule.md | grep -i shanty
+```
+
+## Deployment
+
+The whole thing is one ASGI app (`vibecamp_expansion.asgi:app`) that serves
+REST + static + remote MCP and runs the crawler in a background thread.
+
+- **Docker:** `docker build -t vibecamp . && docker run -p 8787:8787 vibecamp`
+- **Render:** connect the repo as a Blueprint (`render.yaml` included).
+- **Railway / Fly / Heroku-likes:** `Procfile` included; honors `$PORT`.
+
+Notes:
+- The cache + exports live in `VIBECAMP_DATA_DIR` (`/data` in the container).
+  Mount a volume there for persistent history; otherwise it rebuilds on boot
+  (upstream is the source of truth, so this is safe — only the change log
+  resets).
+- On hosts that sleep idle web services (e.g. Render free tier), the in-process
+  crawler pauses while asleep. For an always-fresh crawler use a non-sleeping
+  host, or run the crawler externally and set `VIBECAMP_DISABLE_CRAWLER=1`.
+
+### Connect an MCP client to the hosted server
+
+```json
+{
+  "mcpServers": {
+    "vibecamp": { "url": "https://HOST/mcp/" }
+  }
+}
+```
+
+(Or run it locally over stdio — see below.)
 
 ## Quickstart
 

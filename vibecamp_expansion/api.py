@@ -10,8 +10,9 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, config
 from .models import (
     CrawlStatus,
     DaySummary,
@@ -179,3 +180,9 @@ def day_events(
 @app.get("/sites", response_model=list[Site], tags=["browse"])
 def sites(store: Store = Depends(get_store)) -> list[Site]:
     return [Site(**s) for s in store.list_sites()]
+
+
+# Static, grep-friendly export files (events.ndjson, schedule.md, llms.txt, …)
+# served at /data. An agent can fetch one file and work entirely locally.
+config.EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/data", StaticFiles(directory=str(config.EXPORT_DIR), html=False), name="data")
