@@ -25,6 +25,8 @@ import threading
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from mcp.server.transport_security import TransportSecuritySettings
+
 from . import __version__, config
 # Reuse the REST app directly — it already carries every REST route plus the
 # /data static mount. We attach a lifespan and graft the MCP endpoint onto it.
@@ -41,6 +43,21 @@ log = logging.getLogger("vibecamp.asgi")
 # prefix supplies the path; otherwise the route would be at "/mcp/mcp").
 mcp.settings.stateless_http = True
 mcp.settings.streamable_http_path = "/"
+# The transport's DNS-rebinding protection only trusts localhost by default,
+# which 421s every request once deployed behind a public domain. This is a
+# public, read-only tool server, so we allow all hosts/origins. Override with
+# VIBECAMP_MCP_ALLOWED_HOSTS / _ORIGINS (comma-separated) to lock it down.
+_allowed_hosts = [
+    h.strip() for h in os.environ.get("VIBECAMP_MCP_ALLOWED_HOSTS", "*").split(",") if h.strip()
+]
+_allowed_origins = [
+    o.strip() for o in os.environ.get("VIBECAMP_MCP_ALLOWED_ORIGINS", "*").split(",") if o.strip()
+]
+mcp.settings.transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=False,
+    allowed_hosts=_allowed_hosts,
+    allowed_origins=_allowed_origins,
+)
 mcp_app = mcp.streamable_http_app()
 
 _crawler_started = False
