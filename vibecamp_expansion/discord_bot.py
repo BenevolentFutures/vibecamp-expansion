@@ -62,10 +62,12 @@ def _new_list_embed(title: str, events: list[dict[str, Any]], *, empty: str):
     embed = discord.Embed(title=title)
     for event in events[:_MAX_FIELDS]:
         eid = event.get("event_id", "")
+        url = event.get("url")
+        action = f"[⭐ Star / RSVP →]({url})" if url else f"`/event id:{eid}`"
         value = truncate(
             f"{event_day(event)} {event_time(event)} · "
             f"{event_venue(event)} · {event_stars(event)} {STAR}\n"
-            f"`/event id:{eid}`",
+            f"{action}",
             _FIELD_VALUE_LIMIT,
         )
         embed.add_field(
@@ -83,6 +85,7 @@ def _new_event_embed(event: dict[str, Any]):
     embed = discord.Embed(
         title=truncate(event.get("name") or "(untitled)", 256),
         description=truncate(event.get("description") or "", _EMBED_DESCRIPTION_LIMIT),
+        url=event.get("url") or None,  # makes the title link into my.vibe.camp
     )
     embed.add_field(name="Day", value=event_day(event), inline=True)
     embed.add_field(name="Time", value=event_time(event), inline=True)
@@ -95,6 +98,12 @@ def _new_event_embed(event: dict[str, Any]):
     if event.get("duration_minutes"):
         embed.add_field(
             name="Duration", value=f"{event['duration_minutes']} min", inline=True
+        )
+    if event.get("url"):
+        embed.add_field(
+            name="Star / RSVP",
+            value=f"[Open in my.vibe.camp →]({event['url']})",
+            inline=False,
         )
     embed.set_footer(text=f"id: {event.get('event_id', '')}")
     return embed

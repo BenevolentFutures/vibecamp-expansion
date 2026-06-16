@@ -70,8 +70,10 @@ def _render_list(title: str, events: list[dict[str, Any]], *, empty: str) -> str
     lines = [f"<b>{_esc(title)}</b>", ""]
     for event in events:
         name = _esc(truncate(event.get("name") or "(untitled)", 120))
+        url = event.get("url")
+        heading = f'<a href="{_esc(url)}">{name}</a>' if url else f"<b>{name}</b>"
         lines.append(
-            f"<b>{name}</b>\n"
+            f"{heading}\n"
             f"{event_day(event)} {event_time(event)} · "
             f"{_esc(event_venue(event))} · {event_stars(event)} {STAR}"
         )
@@ -95,6 +97,9 @@ def _render_event(event: dict[str, Any]) -> str:
     if description:
         parts.append("")
         parts.append(_esc(description))
+    if event.get("url"):
+        parts.append("")
+        parts.append(f'<a href="{_esc(event["url"])}">⭐ Star / RSVP in the app →</a>')
     return truncate("\n".join(parts), _MESSAGE_LIMIT)
 
 

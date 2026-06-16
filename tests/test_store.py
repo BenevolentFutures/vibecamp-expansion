@@ -141,6 +141,17 @@ def test_current_edition_default(store):
     assert {e["event_id"] for e in events} == {"now", "old1"}
 
 
+def test_event_url_deep_link(store):
+    reconcile(store, [raw("abc123")])
+    ev = store.get_event("abc123")
+    assert ev["url"].startswith("https://my.vibe.camp/#")
+    assert "abc123" in ev["url"]
+    # compact JSON (no spaces), matching JS JSON.stringify
+    import urllib.parse
+    frag = urllib.parse.unquote(ev["url"].split("#", 1)[1])
+    assert frag == '{"currentView":"Events","viewingEventDetails":"abc123"}'
+
+
 def test_stars_alias(store):
     reconcile(store, [raw("a", bookmarks=42)])
     events, total = store.query_events()

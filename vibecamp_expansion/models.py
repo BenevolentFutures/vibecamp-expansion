@@ -25,6 +25,11 @@ class Event(BaseModel):
     name: str
     description: str = ""
     event_type: Optional[str] = None
+    url: Optional[str] = Field(
+        None,
+        description="Deep link into the my.vibe.camp app at this event — where a "
+        "logged-in user can star / RSVP it natively.",
+    )
 
     # Wall-clock local times (upstream stores local time labeled as UTC).
     start_datetime: Optional[str] = Field(

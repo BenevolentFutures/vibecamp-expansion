@@ -14,6 +14,14 @@ UPSTREAM_BASE_URL = os.environ.get(
 EVENTS_ENDPOINT = f"{UPSTREAM_BASE_URL}/events"
 ICS_ENDPOINT = f"{UPSTREAM_BASE_URL}/events.ics"
 
+# Production my.vibe.camp front-end. We deep-link each event here so users can
+# open it in the official app and star / RSVP natively (we never write upstream
+# or handle their credentials). Format mirrors the upstream backend's own share
+# redirect: BASE/#<urlencoded {"currentView":"Events","viewingEventDetails":id}>.
+FRONT_END_BASE_URL = os.environ.get(
+    "VIBECAMP_FRONT_END_BASE_URL", "https://my.vibe.camp"
+).rstrip("/")
+
 # Where the SQLite cache lives.
 DATA_DIR = Path(
     os.environ.get(

@@ -34,6 +34,28 @@ CONTENT_FIELDS = (
 )
 
 
+def event_url(event_id: Optional[str], base: Optional[str] = None) -> Optional[str]:
+    """Deep link into the my.vibe.camp app at this event's detail view.
+
+    Mirrors the upstream backend's share redirect exactly (compact JSON, like
+    JS ``JSON.stringify``). Opening it lets a logged-in user star / RSVP the
+    event natively — we never write upstream.
+    """
+    if not event_id:
+        return None
+    import json
+    import urllib.parse
+
+    base = (base or config.FRONT_END_BASE_URL).rstrip("/")
+    frag = urllib.parse.quote(
+        json.dumps(
+            {"currentView": "Events", "viewingEventDetails": event_id},
+            separators=(",", ":"),
+        )
+    )
+    return f"{base}/#{frag}"
+
+
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     """Parse an upstream timestamp as naive local wall-clock time."""
     if not value:

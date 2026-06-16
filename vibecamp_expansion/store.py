@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 
 from . import config
+from .normalize import event_url
 
 # Columns persisted on the events table (normalized fields + lifecycle).
 _EVENT_COLUMNS = (
@@ -644,6 +645,9 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     d["is_deleted"] = bool(d.get("is_deleted"))
     # "stars" is the my.vibe.camp UI label for upstream's "bookmarks".
     d["stars"] = d.get("bookmarks", 0)
+    # Deep link into the official app (where users log in + star/RSVP). Derived,
+    # not stored, so it always reflects the configured front-end base URL.
+    d["url"] = event_url(d.get("event_id"))
     d.pop("raw_json", None)
     d.pop("content_hash", None)
     return d

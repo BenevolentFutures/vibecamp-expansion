@@ -206,6 +206,8 @@ For every edition (2024, 2025, 2026), use the .all. variants:
 ## Event fields
 
   event_id        stable UUID
+  url             deep link into the my.vibe.camp app at this event — open it
+                  to star / RSVP natively (logged-in users; this mirror is read-only)
   name            event title
   description     free text
   event_type      UNOFFICIAL | CAMPSITE_OFFICIAL | TEAM_OFFICIAL
