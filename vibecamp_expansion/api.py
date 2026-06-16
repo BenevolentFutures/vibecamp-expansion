@@ -85,18 +85,26 @@ def list_events(
     day: Optional[str] = Query(None, description="Calendar day YYYY-MM-DD (local wall-clock)."),
     filmed: Optional[bool] = Query(None),
     has_av_needs: Optional[bool] = Query(None),
-    min_bookmarks: Optional[int] = Query(None, ge=0),
+    min_bookmarks: Optional[int] = Query(None, ge=0, description="Alias of min_stars."),
+    min_stars: Optional[int] = Query(None, ge=0, description="UI name for min_bookmarks; same thing."),
     include_placeholder: bool = Query(False, description="Include joke/placeholder-dated events."),
     include_deleted: bool = Query(False, description="Include soft-deleted events."),
-    sort: str = Query("start", description="start | -start | bookmarks | name | recent"),
+    include_historical: bool = Query(
+        False,
+        description="Include events from past editions. By default only the "
+        "current edition (Vibe Camp 5 / 2026) is returned.",
+    ),
+    sort: str = Query("start", description="start | -start | bookmarks | stars | name | recent"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> EventList:
     rows, total = store.query_events(
         q=q, event_type=type, site=site, creator=creator,
         start_after=start_after, start_before=start_before, day=day,
-        filmed=filmed, has_av_needs=has_av_needs, min_bookmarks=min_bookmarks,
+        filmed=filmed, has_av_needs=has_av_needs,
+        min_bookmarks=min_stars if min_stars is not None else min_bookmarks,
         include_placeholder=include_placeholder, include_deleted=include_deleted,
+        include_historical=include_historical,
         sort=sort, limit=limit, offset=offset,
     )
     return EventList(
@@ -145,8 +153,14 @@ def history(
 def days(
     store: Store = Depends(get_store),
     include_placeholder: bool = Query(False),
+    include_historical: bool = Query(False, description="Include past editions' days."),
 ) -> list[DaySummary]:
-    return [DaySummary(**d) for d in store.list_days(include_placeholder=include_placeholder)]
+    return [
+        DaySummary(**d)
+        for d in store.list_days(
+            include_placeholder=include_placeholder, include_historical=include_historical
+        )
+    ]
 
 
 @app.get("/days/{date}", response_model=EventList, tags=["browse"])

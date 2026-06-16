@@ -37,6 +37,15 @@ HTTP_READ_TIMEOUT = float(os.environ.get("VIBECAMP_HTTP_READ_TIMEOUT", "90"))
 REAL_YEAR_MIN = int(os.environ.get("VIBECAMP_REAL_YEAR_MIN", "2020"))
 REAL_YEAR_MAX = int(os.environ.get("VIBECAMP_REAL_YEAR_MAX", "2030"))
 
+# The "current edition" — what people actually care about. The feed contains
+# every past edition's events too; by default the API/MCP surface only the
+# current edition, but historical events stay in the cache and are reachable
+# with include_historical=true. Vibe Camp 5 = 2026.
+CURRENT_EDITION_NAME = os.environ.get("VIBECAMP_EDITION_NAME", "Vibe Camp 5")
+# Half-open window [start, end) compared against the YYYY-MM-DD start_date.
+CURRENT_EDITION_START = os.environ.get("VIBECAMP_EDITION_START", "2026-01-01")
+CURRENT_EDITION_END = os.environ.get("VIBECAMP_EDITION_END", "2027-01-01")
+
 
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)

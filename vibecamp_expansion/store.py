@@ -416,6 +416,7 @@ class Store:
         min_bookmarks: Optional[int] = None,
         include_placeholder: bool = False,
         include_deleted: bool = False,
+        include_historical: bool = False,
         sort: str = "start",
         limit: int = 100,
         offset: int = 0,
@@ -441,6 +442,13 @@ class Store:
             where.append("is_deleted = 0")
         if not include_placeholder:
             where.append("is_placeholder = 0")
+        # Default to the current edition. An explicit date narrowing (day /
+        # start_after / start_before) means the caller is steering time
+        # themselves, so we don't also clamp to the edition window.
+        explicit_date_filter = bool(day or start_after or start_before)
+        if not include_historical and not explicit_date_filter:
+            where.append("start_date >= ? AND start_date < ?")
+            params.extend([config.CURRENT_EDITION_START, config.CURRENT_EDITION_END])
         if event_type:
             where.append("event_type = ?")
             params.append(event_type)
@@ -477,6 +485,7 @@ class Store:
             "start": "start_datetime ASC",
             "-start": "start_datetime DESC",
             "bookmarks": "bookmarks DESC",
+            "stars": "bookmarks DESC",  # UI/people's name for bookmarks
             "name": "name ASC",
             "recent": "last_seen DESC",
         }.get(sort, "start_datetime ASC")
@@ -487,15 +496,22 @@ class Store:
         ).fetchall()
         return [_row_to_event(r) for r in rows], total
 
-    def list_days(self, include_placeholder: bool = False) -> list[dict[str, Any]]:
+    def list_days(
+        self, include_placeholder: bool = False, include_historical: bool = False
+    ) -> list[dict[str, Any]]:
         conn = self.connect()
         clause = "WHERE is_deleted = 0 AND start_date IS NOT NULL"
+        params: list[Any] = []
         if not include_placeholder:
             clause += " AND is_placeholder = 0"
+        if not include_historical:
+            clause += " AND start_date >= ? AND start_date < ?"
+            params.extend([config.CURRENT_EDITION_START, config.CURRENT_EDITION_END])
         rows = conn.execute(
             f"SELECT start_date AS date, COUNT(*) AS event_count, "
             f"MIN(start_datetime) AS first_start, MAX(start_datetime) AS last_start "
-            f"FROM events {clause} GROUP BY start_date ORDER BY start_date"
+            f"FROM events {clause} GROUP BY start_date ORDER BY start_date",
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -571,6 +587,11 @@ class Store:
             "AND start_datetime >= ?",
             (now,),
         )
+        edition_events = scalar(
+            "SELECT COUNT(*) FROM events WHERE is_deleted = 0 "
+            "AND start_date >= ? AND start_date < ?",
+            (config.CURRENT_EDITION_START, config.CURRENT_EDITION_END),
+        )
         by_type = {
             r["event_type"] or "(none)": r["c"]
             for r in conn.execute(
@@ -599,6 +620,8 @@ class Store:
             "deleted_events": deleted,
             "placeholder_events": placeholder,
             "real_upcoming_events": real_upcoming,
+            "edition_name": config.CURRENT_EDITION_NAME,
+            "edition_events": edition_events,
             "by_type": by_type,
             "by_site": by_site,
             "filmed_events": filmed,
@@ -619,6 +642,8 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     d["will_be_filmed"] = bool(d.get("will_be_filmed"))
     d["is_placeholder"] = bool(d.get("is_placeholder"))
     d["is_deleted"] = bool(d.get("is_deleted"))
+    # "stars" is the my.vibe.camp UI label for upstream's "bookmarks".
+    d["stars"] = d.get("bookmarks", 0)
     d.pop("raw_json", None)
     d.pop("content_hash", None)
     return d

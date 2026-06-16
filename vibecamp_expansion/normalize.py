@@ -89,6 +89,8 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     plaintext = _clean_str(raw.get("plaintext_location"))
     location = site_name or plaintext
 
+    # Upstream calls this "bookmarks"; the my.vibe.camp UI labels it "stars".
+    # We carry both names so callers can speak either dialect.
     bookmarks = raw.get("bookmarks") or 0
     try:
         bookmarks = int(bookmarks)

@@ -19,6 +19,14 @@ project crawls that feed on a schedule into a local cache and serves it back as:
   Every change lands in an append-only history log.
 - **No history spam.** Bookmark counts churn constantly; they update silently
   and don't pollute the change history. Only genuine content changes are logged.
+- **Current edition by default.** The feed contains every past edition's
+  events. By default the API/MCP surface only the current edition (**Vibe Camp
+  5 / 2026** — the only events attendees care about). Historical events stay in
+  the cache and are reachable with `include_historical=true`. Rolling editions
+  is a config change, not a code change.
+- **`stars` == `bookmarks`.** Upstream names the save-count `bookmarks`; the
+  my.vibe.camp UI and people call it **stars**. Every event carries both
+  (identical), `sort=stars` works, and `min_stars`/`min_bookmarks` are aliases.
 - **Real vs. joke events.** The live data contains placeholder entries with
   implausible dates (year 1999, 3025). These are flagged `is_placeholder` and
   hidden by default.
@@ -75,8 +83,9 @@ vibecamp stats
 | `GET /health` | Liveness |
 
 `GET /events` filters: `q`, `type`, `site`, `creator`, `day`, `start_after`,
-`start_before`, `filmed`, `has_av_needs`, `min_bookmarks`,
-`include_placeholder`, `include_deleted`, `sort`, `limit`, `offset`.
+`start_before`, `filmed`, `has_av_needs`, `min_stars` (= `min_bookmarks`),
+`include_placeholder`, `include_deleted`, `include_historical`, `sort`
+(`start | -start | stars | name | recent`), `limit`, `offset`.
 
 ## MCP tools
 
@@ -107,6 +116,8 @@ macOS launchd plist is provided in `deploy/` for a 5-minute cadence.
 | `VIBECAMP_DB_PATH` | `$DATA_DIR/vibecamp.db` |
 | `VIBECAMP_CRAWL_INTERVAL` | `300` |
 | `VIBECAMP_REAL_YEAR_MIN` / `_MAX` | `2020` / `2030` |
+| `VIBECAMP_EDITION_NAME` | `Vibe Camp 5` |
+| `VIBECAMP_EDITION_START` / `_END` | `2026-01-01` / `2027-01-01` |
 
 ## Tests
 

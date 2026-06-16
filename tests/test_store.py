@@ -115,7 +115,40 @@ def test_placeholder_filtered_by_default(store):
     events, total = store.query_events()
     assert total == 1
     events, total = store.query_events(include_placeholder=True)
+    # 3025 is also outside the current edition window, so still hidden unless historical.
+    assert total == 1
+    events, total = store.query_events(include_placeholder=True, include_historical=True)
     assert total == 2
+
+
+def test_current_edition_default(store):
+    reconcile(store, [
+        raw("now", start_datetime="2026-06-19T18:00:00.000Z"),
+        raw("old1", start_datetime="2025-06-21T18:00:00.000Z"),
+        raw("old2", start_datetime="2024-04-06T18:00:00.000Z"),
+    ])
+    # default: only the 2026 edition
+    events, total = store.query_events()
+    assert total == 1 and events[0]["event_id"] == "now"
+    # historical opt-in: everything
+    events, total = store.query_events(include_historical=True)
+    assert total == 3
+    # explicit historical day overrides the edition clamp
+    events, total = store.query_events(day="2024-04-06")
+    assert total == 1 and events[0]["event_id"] == "old2"
+    # explicit start_after into the past also overrides
+    events, total = store.query_events(start_after="2025-01-01T00:00:00")
+    assert {e["event_id"] for e in events} == {"now", "old1"}
+
+
+def test_stars_alias(store):
+    reconcile(store, [raw("a", bookmarks=42)])
+    events, total = store.query_events()
+    assert events[0]["stars"] == 42 == events[0]["bookmarks"]
+    # sort=stars works like sort=bookmarks
+    reconcile(store, [raw("a", bookmarks=42), raw("b", bookmarks=99)])
+    events, total = store.query_events(sort="stars")
+    assert events[0]["event_id"] == "b"
 
 
 def test_filters(store):

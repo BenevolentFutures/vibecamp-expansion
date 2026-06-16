@@ -44,12 +44,17 @@ def search_events(
     day: Optional[str] = None,
     start_after: Optional[str] = None,
     start_before: Optional[str] = None,
-    min_bookmarks: Optional[int] = None,
+    min_stars: Optional[int] = None,
     include_placeholder: bool = False,
+    include_historical: bool = False,
     sort: str = "start",
     limit: int = 25,
 ) -> dict[str, Any]:
     """Search and filter Vibe Camp events.
+
+    By default only the current edition (Vibe Camp 5 / 2026) is returned —
+    that's what attendees care about. Pass include_historical=True for prior
+    editions (2024, 2025).
 
     Args:
         query: Free-text search over name, description, location, and creator.
@@ -58,15 +63,17 @@ def search_events(
         creator: Exact creator/host name.
         day: Calendar day YYYY-MM-DD (local wall-clock time).
         start_after / start_before: ISO datetime bounds (e.g. "2026-06-19T18:00").
-        min_bookmarks: Only events with at least this many bookmarks.
+        min_stars: Only events with at least this many stars (a.k.a. bookmarks).
         include_placeholder: Include joke/placeholder-dated events (default off).
-        sort: start | -start | bookmarks | name | recent.
+        include_historical: Include past editions' events (default off).
+        sort: start | -start | stars | name | recent.
         limit: Max events to return (1-200).
     """
     rows, total = store().query_events(
         q=query or None, event_type=event_type, site=site, creator=creator,
         day=day, start_after=start_after, start_before=start_before,
-        min_bookmarks=min_bookmarks, include_placeholder=include_placeholder,
+        min_bookmarks=min_stars, include_placeholder=include_placeholder,
+        include_historical=include_historical,
         sort=sort, limit=max(1, min(limit, 200)),
     )
     return {"total": total, "returned": len(rows), "events": rows}
@@ -109,16 +116,24 @@ def upcoming_events(limit: int = 15, within_hours: Optional[int] = None) -> dict
 
 
 @mcp.tool()
-def popular_events(limit: int = 15) -> dict[str, Any]:
-    """The most-bookmarked events (a proxy for popularity)."""
-    rows, total = store().query_events(sort="bookmarks", limit=max(1, min(limit, 200)))
+def popular_events(limit: int = 15, include_historical: bool = False) -> dict[str, Any]:
+    """The most-starred (a.k.a. most-bookmarked) events — a proxy for popularity.
+
+    Defaults to the current edition; pass include_historical=True for all-time.
+    """
+    rows, total = store().query_events(
+        sort="stars", include_historical=include_historical, limit=max(1, min(limit, 200))
+    )
     return {"total": total, "events": rows}
 
 
 @mcp.tool()
-def list_days() -> dict[str, Any]:
-    """List every calendar day that has events, with per-day counts."""
-    return {"days": store().list_days()}
+def list_days(include_historical: bool = False) -> dict[str, Any]:
+    """List every calendar day that has events, with per-day counts.
+
+    Defaults to the current edition (Vibe Camp 5 / 2026).
+    """
+    return {"days": store().list_days(include_historical=include_historical)}
 
 
 @mcp.tool()

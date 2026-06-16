@@ -52,7 +52,14 @@ class Event(BaseModel):
     created_by_account_id: Optional[str] = None
     will_be_filmed: bool = False
     av_needs: Optional[str] = None
-    bookmarks: int = 0
+    bookmarks: int = Field(
+        0, description="Upstream's name for stars. Equal to `stars`."
+    )
+    stars: int = Field(
+        0,
+        description="The my.vibe.camp UI label for `bookmarks`. Same number, "
+        "exposed under the name people actually use.",
+    )
 
     # Derived flags.
     is_placeholder: bool = Field(
@@ -130,6 +137,8 @@ class Stats(BaseModel):
     deleted_events: int
     placeholder_events: int
     real_upcoming_events: int
+    edition_name: str = Field(..., description="The current edition surfaced by default.")
+    edition_events: int = Field(..., description="Active events in the current edition.")
     by_type: dict[str, int]
     by_site: dict[str, int]
     filmed_events: int
