@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent: crawl the Vibe Camp feed every 5 minutes.
+
+  Install:
+    cp deploy/com.vibecamp.crawler.plist ~/Library/LaunchAgents/
+    # edit the two REPLACE_ME paths below first
+    launchctl load ~/Library/LaunchAgents/com.vibecamp.crawler.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.vibecamp.crawler.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vibecamp.crawler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- REPLACE_ME: absolute path to the vibecamp entry point in your venv -->
+        <string>/REPLACE_ME/.venv/bin/vibecamp</string>
+        <string>crawl</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/REPLACE_ME/crawler.log</string>
+    <key>StandardErrorPath</key>
+    <string>/REPLACE_ME/crawler.log</string>
+</dict>
+</plist>
