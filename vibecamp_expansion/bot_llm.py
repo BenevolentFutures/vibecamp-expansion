@@ -180,12 +180,12 @@ async def smart_select(
     by_id = {e["event_id"]: e for e in candidates if e.get("event_id")}
     compact = [_compact(e) for e in candidates]
 
-    # Stable prefix (instructions + event pool) is cached; the volatile query
-    # goes last so repeated calls within the cache window reuse the prefix.
-    events_block = (
-        f"CURRENT_TIME: {now.strftime('%A %H:%M')} (Eastern)\n\n"
-        f"EVENTS (JSON):\n{json.dumps(compact, ensure_ascii=False)}"
-    )
+    # Cached prefix = instructions + event pool. CURRENT_TIME is volatile (it
+    # changes every minute) so it must NOT live in the cached block — it goes in
+    # the user turn below, after the cache breakpoint. Otherwise the ~34k-token
+    # pool would be rewritten to cache every minute (~$0.24/call) instead of
+    # reused across the 5-min TTL (~$0.02/call).
+    events_block = f"EVENTS (JSON):\n{json.dumps(compact, ensure_ascii=False)}"
 
     client = AsyncAnthropic()
     try:
@@ -196,7 +196,10 @@ async def smart_select(
                 {"type": "text", "text": _SYSTEM},
                 {"type": "text", "text": events_block, "cache_control": {"type": "ephemeral"}},
             ],
-            messages=[{"role": "user", "content": f"Guest message: {query}"}],
+            messages=[{
+                "role": "user",
+                "content": f"CURRENT_TIME: {now.strftime('%A %H:%M')} (Eastern)\nGuest message: {query}",
+            }],
             # Adaptive thinking lets the model reason about multi-constraint asks
             # before committing to picks; effort tunes depth vs. chat latency.
             thinking={"type": "adaptive"},
