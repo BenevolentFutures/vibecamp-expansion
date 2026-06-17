@@ -25,6 +25,7 @@ from typing import Any
 from vibecamp_expansion.bot_api import (
     DEFAULT_API_BASE,
     VibecampAPI,
+    event_day,
     event_stars,
     is_future,
     now_local,
@@ -106,6 +107,7 @@ async def main() -> int:
 
         now_q = "what's happening right now?"
         pool_pop_q = "what's popular at the pool?"
+        day_q = "what events are on Saturday?"
 
         results: dict[str, list[dict[str, Any]]] = {}
         for q in [
@@ -113,6 +115,7 @@ async def main() -> int:
             ai_q,
             now_q,
             pool_pop_q,
+            day_q,
             "anything at the pool?",
             "find me the sea shanties",
             "what are the most popular events?",
@@ -170,6 +173,14 @@ async def main() -> int:
         pp_stars = [event_stars(e) for e in pp]
         if pp_stars != sorted(pp_stars, reverse=True):
             failures.append(f"'popular at the pool' not sorted by stars desc: {pp_stars}")
+        # 9. A named-weekday query returns only that weekday's events (regression
+        #    guard: day questions must not fall through to "soonest from now").
+        day_results = results[day_q]
+        wrong_day = [e["name"] for e in day_results if event_day(e) != "Saturday"]
+        if not day_results:
+            failures.append("'what's on Saturday' returned nothing")
+        if wrong_day:
+            failures.append(f"'what's on Saturday' returned non-Saturday events: {wrong_day}")
 
         # --- LLM-judge checks -------------------------------------------- #
         print("\n=== LLM judge ===")

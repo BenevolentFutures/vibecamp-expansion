@@ -109,14 +109,21 @@ Set `mode`:
 - "now" — they ask what's happening RIGHT NOW / on at the moment / right this \
 minute. (The system fills these with events starting around now — just began \
 or about to.)
-- "upcoming" — they ask what's next / soon / later today / "what's on Friday". \
-(The system fills these by time.)
+- "upcoming" — they ask what's next / soon / later today, with NO specific \
+weekday named. (The system fills these by time.)
 - "popular" — they ask what's most popular / best / top / most-starred. \
 (The system fills these by star count.)
 - "select" — anything else: an interest ("into AI", "live music", "something \
 spiritual"), a venue ("at the pool", "in the barn"), a host ("hosted by Atin", \
-"Sarah's events" — match the `host` field), or a specific thing ("shanties", \
+"Sarah's events" — match the `host` field), a specific day or time ("what's on \
+Friday", "Saturday morning", "Thursday night"), or a specific thing ("shanties", \
 "tarot"). For this mode you choose the events.
+
+A named weekday (Thursday–Sunday) ALWAYS means "select": read each event's \
+`day` and `time` and pick the ones on that day (and time of day, if given), in \
+time order — even when phrased as "what's happening Friday" or "what's on \
+Saturday". Do NOT use "now" or "upcoming" when the guest names a weekday; those \
+ignore the day and would wrongly return the next events from right now.
 
 For mode "select", put up to 20 matching event_ids in `event_ids`, best first. \
 Match on meaning, not just words — an AI fan should get "Let's Form a Hive \
