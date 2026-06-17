@@ -76,22 +76,36 @@ def _esc(text: str) -> str:
 
 
 def _render_list(title: str, events: list[dict[str, Any]], *, empty: str) -> str:
-    """Render events as a single HTML message, respecting Telegram's limit."""
+    """Render events as a single HTML message, respecting Telegram's limit.
+
+    Adds events until the next one wouldn't fit in Telegram's 4096-char body,
+    then appends an "…and N more" note — so a long result set never silently
+    looks complete when it was actually cut off.
+    """
     if not events:
         return f"<b>{_esc(title)}</b>\n\n{_esc(empty)}"
 
-    lines = [f"<b>{_esc(title)}</b>", ""]
-    for event in events:
+    head = f"<b>{_esc(title)}</b>\n"
+    blocks: list[str] = []
+    length = len(head)
+    # Reserve room for the overflow footer so adding it never busts the limit.
+    budget = _MESSAGE_LIMIT - 80
+    for i, event in enumerate(events):
         name = _esc(truncate(event.get("name") or "(untitled)", 120))
         url = event.get("url")
         heading = f'<a href="{_esc(url)}">{name}</a>' if url else f"<b>{name}</b>"
-        lines.append(
-            f"{heading}\n"
+        block = (
+            f"\n{heading}\n"
             f"{event_day(event)} {event_time(event)} · "
-            f"{_esc(event_venue(event))} · {event_stars(event)} {STAR}"
+            f"{_esc(event_venue(event))} · {event_stars(event)} {STAR}\n"
         )
-        lines.append("")
-    return truncate("\n".join(lines), _MESSAGE_LIMIT)
+        if length + len(block) > budget and blocks:
+            remaining = len(events) - i
+            blocks.append(f"\n<i>…and {remaining} more — narrow your search to see them.</i>")
+            break
+        blocks.append(block)
+        length += len(block)
+    return truncate(head + "".join(blocks), _MESSAGE_LIMIT)
 
 
 def _render_event(event: dict[str, Any]) -> str:

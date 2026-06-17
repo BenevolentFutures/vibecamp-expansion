@@ -47,7 +47,7 @@ EFFORT = os.environ.get("ANTHROPIC_EFFORT", "medium")
 
 # Size of the candidate pool handed to the model, and of the returned list.
 _CANDIDATE_LIMIT = 250
-_RESULT_LIMIT = 8
+_RESULT_LIMIT = 20
 
 # Truncate each candidate's description to keep the prompt compact.
 _DESC_CHARS = 200
@@ -75,7 +75,7 @@ spiritual"), a venue ("at the pool", "in the barn"), a host ("hosted by Atin", \
 "Sarah's events" — match the `host` field), or a specific thing ("shanties", \
 "tarot"). For this mode you choose the events.
 
-For mode "select", put up to 8 matching event_ids in `event_ids`, best first. \
+For mode "select", put up to 20 matching event_ids in `event_ids`, best first. \
 Match on meaning, not just words — an AI fan should get "Let's Form a Hive \
 Mind!" or "Claude Squad" even though they don't contain "AI". Be strict: only \
 include events with a clear, direct connection to the request, and omit \
@@ -123,7 +123,7 @@ _SCHEMA = {
         "event_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "For mode 'select': chosen event_ids, best first, max 8.",
+            "description": "For mode 'select': chosen event_ids, best first, max 20.",
         },
     },
     "required": ["interpretation", "mode", "sort", "framing", "event_ids"],

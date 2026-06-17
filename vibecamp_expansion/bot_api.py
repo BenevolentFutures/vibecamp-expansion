@@ -22,8 +22,10 @@ import httpx
 # Hosted REST API; overridable via VIBECAMP_API_BASE in each bot's entry point.
 DEFAULT_API_BASE = "https://vibecamp-expansion-production.up.railway.app"
 
-# How many results list-style commands show.
-LIST_LIMIT = 8
+# How many results list-style commands show. Telegram's real ceiling is the
+# 4096-char message body (~20+ compact events); the renderer trims to fit and
+# notes any overflow, so this can be generous without breaking a message.
+LIST_LIMIT = 20
 
 STAR = "⭐"  # output reads "5 ⭐" everywhere
 
