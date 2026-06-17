@@ -60,6 +60,41 @@ def test_roundtrip_persistence(tmp_path) -> None:
     assert b.started_at == 10.0
 
 
+def test_tracks_cost_and_per_user() -> None:
+    a = Analytics(started_at=0.0)
+    a.record("u1", "text")
+    a.record_cost("u1", 0.10)
+    a.record("u1", "text")
+    a.record_cost("u1", 0.02)
+    a.record("u2", "now")  # command, no LLM cost
+    s = a.summary(now=0.0)
+    assert s["total_cost"] == 0.12
+    assert s["avg_queries_per_user"] == 1.5  # 3 messages / 2 users
+    top = s["top_users"]
+    assert top[0] == {"user": "u1", "queries": 2, "cost": 0.12}
+    assert top[1] == {"user": "u2", "queries": 1, "cost": 0.0}
+
+
+def test_record_cost_ignores_zero() -> None:
+    a = Analytics(started_at=0.0)
+    a.record("u1", "text")
+    a.record_cost("u1", 0.0)
+    assert a.summary()["total_cost"] == 0.0
+    assert a.cost_by_user == {}
+
+
+def test_cost_and_per_user_survive_roundtrip(tmp_path) -> None:
+    a = Analytics(started_at=0.0)
+    a.record("u1", "text")
+    a.record_cost("u1", 0.25)
+    path = str(tmp_path / "a.json")
+    a.save(path)
+    b = Analytics.load(path)
+    assert b.total_cost == 0.25
+    assert b.by_user["u1"] == 1
+    assert b.cost_by_user["u1"] == 0.25
+
+
 def test_load_missing_file_returns_fresh() -> None:
     a = Analytics.load("/nonexistent/path/analytics.json")
     assert a.total == 0

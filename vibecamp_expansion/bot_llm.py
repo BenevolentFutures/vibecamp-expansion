@@ -39,6 +39,46 @@ logger = logging.getLogger(__name__)
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
+# Friendly aliases the admin can switch between at runtime (see set_model).
+MODEL_ALIASES = {
+    "haiku": "claude-haiku-4-5",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-8",
+}
+
+# Approx pricing in $/1M tokens by model id: (input, output, cache_write, cache_read).
+_PRICING = {
+    "claude-opus-4-8": (5.0, 25.0, 6.25, 0.50),
+    "claude-sonnet-4-6": (3.0, 15.0, 3.75, 0.30),
+    "claude-haiku-4-5": (1.0, 5.0, 1.25, 0.10),
+}
+
+
+def set_model(name: str) -> str:
+    """Switch the concierge model at runtime. Accepts an alias (haiku/sonnet/
+    opus) or a full model id; returns the resolved model id. Raises ValueError
+    on an unrecognised name."""
+    global MODEL
+    resolved = MODEL_ALIASES.get(name.strip().lower(), name.strip())
+    if resolved not in _PRICING:
+        raise ValueError(f"unknown model: {name!r}")
+    MODEL = resolved
+    return resolved
+
+
+def usage_cost(model: str, usage: Any) -> float:
+    """Estimate the $ cost of one call from its token usage (0 if unknown)."""
+    rates = _PRICING.get(model)
+    if rates is None or usage is None:
+        return 0.0
+    pin, pout, pcw, pcr = rates
+    return (
+        (getattr(usage, "input_tokens", 0) or 0) * pin
+        + (getattr(usage, "output_tokens", 0) or 0) * pout
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0) * pcw
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0) * pcr
+    ) / 1_000_000
+
 # Reasoning effort for the concierge. Adaptive thinking is always on (it lets the
 # model reason about multi-constraint requests before choosing); effort tunes how
 # hard it thinks. "medium" balances quality against chat latency — raise to
@@ -179,7 +219,7 @@ async def smart_select(
     # never surfaced (and never offered to the model to pick).
     candidates = future_filter(await api.search_events(sort="start", limit=_CANDIDATE_LIMIT), now)
     if not candidates:
-        return {"events": [], "framing": "", "interpretation": ""}
+        return {"events": [], "framing": "", "interpretation": "", "cost": 0.0}
     by_id = {e["event_id"]: e for e in candidates if e.get("event_id")}
     compact = [_compact(e) for e in candidates]
 
@@ -191,9 +231,10 @@ async def smart_select(
     events_block = f"EVENTS (JSON):\n{json.dumps(compact, ensure_ascii=False)}"
 
     client = AsyncAnthropic()
+    current_model = MODEL  # capture in case an admin switches mid-flight
     try:
         resp = await client.messages.create(
-            model=MODEL,
+            model=current_model,
             max_tokens=8000,  # headroom for adaptive thinking + the small JSON answer
             system=[
                 {"type": "text", "text": _SYSTEM},
@@ -264,6 +305,7 @@ async def smart_select(
         "events": ordered,
         "framing": framing,
         "interpretation": parsed.get("interpretation", ""),
+        "cost": usage_cost(current_model, resp.usage),
     }
 
 
@@ -278,7 +320,11 @@ async def curate(api: VibecampAPI, query: str) -> dict[str, Any]:
 
     result = await smart_select(api, query)
     if result is not None:
-        return {"events": result["events"], "framing": result["framing"]}
+        return {
+            "events": result["events"],
+            "framing": result["framing"],
+            "cost": result.get("cost", 0.0),
+        }
     # Keyword fallback: still drop anything already over before showing it.
     events = future_filter(await recommend(api, query))
-    return {"events": events, "framing": ""}
+    return {"events": events, "framing": "", "cost": 0.0}

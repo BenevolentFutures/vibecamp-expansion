@@ -37,6 +37,7 @@ from .bot_api import (
     now_feed,
     truncate,
 )
+from . import bot_llm
 from .analytics import Analytics
 from .bot_llm import curate
 from .ratelimit import SlidingWindowRateLimiter
@@ -47,10 +48,17 @@ _ANALYTICS_PATH = os.environ.get("VIBECAMP_ANALYTICS_PATH")
 # Log a summary + persist every this many messages, so growth is visible in the
 # deploy logs even without anyone running /stats.
 _ANALYTICS_FLUSH_EVERY = 25
-# Optional admin allow-list for /stats (comma-separated chat ids). If unset,
-# /stats is open to anyone (it's cheap and undocumented).
+# Admin allow-list for /stats. Configure by username (TELEGRAM_ADMIN_USERNAMES,
+# comma-separated, with or without a leading @) and/or numeric chat id
+# (TELEGRAM_ADMIN_IDS). If neither is set, /stats is open to anyone (it's cheap
+# and undocumented). If either is set, /stats only answers listed admins.
 _ADMIN_IDS = {
     s.strip() for s in os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",") if s.strip()
+}
+_ADMIN_USERNAMES = {
+    s.strip().lstrip("@").lower()
+    for s in os.environ.get("TELEGRAM_ADMIN_USERNAMES", "").split(",")
+    if s.strip()
 }
 
 
@@ -365,6 +373,9 @@ def build_app(
     async def _recommend_reply(update, interest: str) -> None:
         # The concierge call takes a few seconds (it now thinks) — show "typing…".
         curated = await _with_typing(update, curate(api, interest))
+        # Attribute the LLM call's estimated cost to this user for /stats.
+        if update.effective_chat is not None:
+            analytics.record_cost(_user_key(update.effective_chat.id), curated.get("cost", 0.0))
         results = curated["events"]
         if not results:
             await _reply(
@@ -376,26 +387,72 @@ def build_app(
         title = curated["framing"] or f"Picks for: {truncate(interest, 100)}"
         await _reply(update, _render_list(title, results, empty=""))
 
-    async def stats_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
-        """Report usage analytics (how many people have used the bot)."""
+    def _is_admin(update) -> bool:
+        """True if the requester may use admin commands (/stats, /model).
+
+        Open to everyone when no allow-list is configured; otherwise restricted
+        to the configured admin usernames / chat ids.
+        """
+        if not (_ADMIN_IDS or _ADMIN_USERNAMES):
+            return True
         chat = update.effective_chat
-        if _ADMIN_IDS and (chat is None or str(chat.id) not in _ADMIN_IDS):
+        user = update.effective_user
+        uname = (user.username or "").lower() if user else ""
+        return (chat is not None and str(chat.id) in _ADMIN_IDS) or (
+            uname != "" and uname in _ADMIN_USERNAMES
+        )
+
+    async def stats_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Report usage analytics (admin only when an allow-list is configured)."""
+        if not _is_admin(update):
             await _reply(update, _HELP)  # not an admin — treat like an unknown cmd
             return
         s = analytics.summary()
         lines = [
             "📊 <b>Bot usage</b>",
             f"Unique users: <b>{s['unique_users']}</b>",
-            f"Total messages: <b>{s['total_messages']}</b>",
-            f"Rate-limited requests: {s['rate_limited']}",
+            f"Total messages: <b>{s['total_messages']}</b> "
+            f"(avg {s['avg_queries_per_user']}/user)",
+            f"Est. spend: <b>${s['total_cost']:.2f}</b>",
+            f"Rate-limited: {s['rate_limited']}",
+            f"Model: {_esc(bot_llm.MODEL)}",
             f"Uptime: {s['uptime_seconds'] / 3600:.1f}h",
         ]
         if s["by_kind"]:
             top = ", ".join(f"{k} {v}" for k, v in list(s["by_kind"].items())[:6])
             lines.append(f"By type: {_esc(top)}")
+        if s["top_users"]:
+            lines.append("Top users (id · queries · spend):")
+            for u in s["top_users"]:
+                lines.append(f"  {u['user'][:8]} · {u['queries']} · ${u['cost']:.2f}")
         if not analytics_path:
             lines.append("<i>(counts reset on redeploy — no durable store configured)</i>")
         await _reply(update, "\n".join(lines))
+
+    async def model_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Switch the concierge model at runtime (admin only). e.g. /model haiku."""
+        if not _is_admin(update):
+            await _reply(update, _HELP)
+            return
+        arg = (context.args[0] if context.args else "").strip()
+        if not arg:
+            await _reply(
+                update,
+                f"Current model: <b>{_esc(bot_llm.MODEL)}</b>\n"
+                "Switch with /model haiku · /model sonnet · /model opus.",
+            )
+            return
+        try:
+            resolved = bot_llm.set_model(arg)
+        except ValueError:
+            await _reply(update, "Unknown model. Try: /model haiku, /model sonnet, or /model opus.")
+            return
+        logger.info("Concierge model switched to %s", resolved)
+        await _reply(
+            update,
+            f"✅ Concierge model set to <b>{_esc(resolved)}</b>. "
+            "(Reverts to the default on redeploy.)",
+        )
 
     async def _rate_limit_gate(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Pre-check every update against the per-chat rate limit.
@@ -480,6 +537,7 @@ def build_app(
     app.add_handler(CommandHandler("recommend", recommend_cmd))
     app.add_handler(CommandHandler("event", event_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))  # usage analytics (undocumented)
+    app.add_handler(CommandHandler("model", model_cmd))  # admin: switch concierge model
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     return app
 
