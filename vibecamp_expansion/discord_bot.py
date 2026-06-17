@@ -13,6 +13,12 @@ Configuration (environment variables):
   guild for instant availability during development (global sync can take up
   to an hour to propagate).
 
+In a server the bot is slash-command only. In a **direct message** it also
+answers plain text through the same LLM concierge as the Telegram bot — so you
+can just DM it "what's happening now?". That requires the Message Content
+privileged intent (enable it in the Developer Portal); without it the bot runs
+slash-only and never crashes.
+
 Run with ``vibecamp discord`` (see ``cli.py``).
 """
 
@@ -120,17 +126,31 @@ def _new_event_embed(event: dict[str, Any]):
 # --------------------------------------------------------------------------- #
 
 
-def build_bot(api: VibecampAPI, *, guild_id: Optional[int] = None):
+def build_bot(
+    api: VibecampAPI,
+    *,
+    guild_id: Optional[int] = None,
+    enable_message_content: bool = True,
+):
     """Construct the Discord client and register all slash commands.
 
     ``guild_id`` (optional) scopes command sync to a single guild for instant
-    availability during development.
+    availability during development. ``enable_message_content`` requests the
+    Message Content privileged intent so the bot can read plain-text DMs and
+    answer them like the Telegram bot does; set it False to run slash-only
+    (the fallback when the intent isn't enabled in the Developer Portal).
     """
     import discord
     from discord import app_commands
 
     intents = discord.Intents.none()
     intents.guilds = True
+    if enable_message_content:
+        # DM events + their text, so a person can just message the bot. We never
+        # read guild message content (no `guild_messages`) — in servers the bot
+        # is slash-command only, which keeps it non-invasive and unprivileged.
+        intents.dm_messages = True
+        intents.message_content = True
 
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
@@ -147,7 +167,34 @@ def build_bot(api: VibecampAPI, *, guild_id: Optional[int] = None):
         else:
             await tree.sync()
             logger.info("Synced global commands")
-        logger.info("Logged in as %s", client.user)
+        logger.info(
+            "Logged in as %s (dm_replies=%s)", client.user, enable_message_content
+        )
+
+    @client.event
+    async def on_message(message) -> None:  # noqa: ANN001
+        """Answer plain-text direct messages via the same concierge as Telegram.
+
+        DMs only — guild messages are ignored (use slash commands there). This
+        is a no-op unless the Message Content intent is enabled, since
+        ``message.content`` is otherwise empty.
+        """
+        if message.author.bot or message.guild is not None:
+            return
+        content = (message.content or "").strip()
+        if not content or content.startswith("/"):
+            return
+        async with message.channel.typing():
+            curated = await curate(api, content)
+        results = curated["events"]
+        if not results:
+            await message.channel.send(
+                "Couldn't find anything matching that. Try a broader interest, "
+                "or a day, a venue, or `/help`."
+            )
+            return
+        title = curated["framing"] or f"Picks for: {truncate(content, 200)}"
+        await message.channel.send(embed=_new_list_embed(title, results, empty=""))
 
     @tree.command(name="now", description="What's happening right now (and starting soon).")
     async def now_cmd(interaction) -> None:  # noqa: ANN001
@@ -274,14 +321,32 @@ def run() -> int:
     for noisy in ("httpx", "httpcore", "discord", "discord.http"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    api = VibecampAPI(api_base)
-    bot = build_bot(api, guild_id=guild_id)
+    import asyncio
 
-    logger.info("Starting Vibe Camp Discord bot against %s", api_base)
-    try:
-        bot.run(token, log_handler=None)
-    finally:
-        import asyncio
+    import discord
 
-        asyncio.run(api.aclose())
+    # Prefer full DM free-text support; if the Message Content intent isn't
+    # enabled in the Developer Portal yet, Discord rejects the connection — so
+    # fall back to slash-only rather than crash-loop. A restart picks up DM
+    # support automatically once the portal toggle is on.
+    for enable_mc in (True, False):
+        api = VibecampAPI(api_base)
+        bot = build_bot(api, guild_id=guild_id, enable_message_content=enable_mc)
+        logger.info(
+            "Starting Vibe Camp Discord bot (dm_replies=%s) against %s",
+            enable_mc, api_base,
+        )
+        try:
+            bot.run(token, log_handler=None)
+            return 0  # clean shutdown
+        except discord.errors.PrivilegedIntentsRequired:
+            logger.error(
+                "Message Content intent is not enabled for this bot, so DM "
+                "free-text replies are OFF. Enable it at "
+                "https://discord.com/developers/applications -> your app -> Bot "
+                "-> Privileged Gateway Intents -> Message Content, then restart. "
+                "Falling back to slash-commands-only for now."
+            )
+        finally:
+            asyncio.run(api.aclose())
     return 0

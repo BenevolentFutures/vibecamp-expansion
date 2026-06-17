@@ -20,6 +20,7 @@ import asyncio
 import html
 import logging
 import os
+import time
 from typing import Any
 
 from .bot_api import (
@@ -36,8 +37,26 @@ from .bot_api import (
     truncate,
 )
 from .bot_llm import curate
+from .ratelimit import SlidingWindowRateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Per-chat rate limit defaults: 10 messages per rolling 10-minute window.
+# Overridable via env in ``run()``. The limit protects the bot (and the paid
+# Anthropic LLM call behind each free-text reply) from a single spammer.
+_RATE_LIMIT_MAX = int(os.environ.get("TELEGRAM_RATE_LIMIT_MAX", "10"))
+_RATE_LIMIT_WINDOW_SECONDS = float(
+    os.environ.get("TELEGRAM_RATE_LIMIT_WINDOW_SECONDS", "600")
+)
+
+# Don't re-send the "slow down" reply on every blocked update — once a chat is
+# over the limit it may keep firing. Send it at most once per this cooldown.
+_RATE_LIMIT_NOTICE_COOLDOWN_SECONDS = 60.0
+
+_RATE_LIMITED_MESSAGE = (
+    "🏕️ You're moving fast! I can take about {max} questions every "
+    "{minutes} minutes — give me a couple of minutes and ask again."
+)
 
 # Telegram's hard limit on a single message body.
 _MESSAGE_LIMIT = 4096
@@ -135,21 +154,40 @@ def _render_event(event: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def build_app(api: VibecampAPI, token: str):
+def build_app(
+    api: VibecampAPI,
+    token: str,
+    *,
+    rate_limit_max: int = _RATE_LIMIT_MAX,
+    rate_limit_window_seconds: float = _RATE_LIMIT_WINDOW_SECONDS,
+):
     """Construct the Telegram ``Application`` and register all handlers.
 
     ``token`` is the bot token from @BotFather. Import of ``telegram`` is local
     so this module imports without python-telegram-bot installed (e.g. for
     byte-compile checks). The API client is closed on shutdown.
+
+    ``rate_limit_max`` / ``rate_limit_window_seconds`` configure the per-chat
+    sliding-window rate limit (default 10 messages / 600s); see the pre-check
+    handler below.
     """
+    from telegram import Update
     from telegram.constants import ChatAction
     from telegram.ext import (
         Application,
+        ApplicationHandlerStop,
         CommandHandler,
         ContextTypes,
         MessageHandler,
+        TypeHandler,
         filters,
     )
+
+    # In-memory, per-chat limiter (fine for single-instance polling). When a
+    # chat is over the limit we reply once per cooldown and stop the update from
+    # reaching any real handler — so the paid LLM call never runs for a spammer.
+    limiter = SlidingWindowRateLimiter(rate_limit_max, rate_limit_window_seconds)
+    last_notice: dict[int, float] = {}
 
     async def _post_shutdown(_app) -> None:
         await api.aclose()
@@ -286,6 +324,39 @@ def build_app(api: VibecampAPI, token: str):
         title = curated["framing"] or f"Picks for: {truncate(interest, 100)}"
         await _reply(update, _render_list(title, results, empty=""))
 
+    async def _rate_limit_gate(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Pre-check every update against the per-chat rate limit.
+
+        Registered in a lower group so it runs before any command/message
+        handler. If the chat is over the limit, reply (at most once per
+        cooldown) and raise ``ApplicationHandlerStop`` so the update never
+        reaches a real handler — crucially skipping the paid LLM call.
+        """
+        chat = update.effective_chat
+        if chat is None:
+            return  # nothing to key on; let normal handling proceed
+        now = time.time()
+        if limiter.allow(str(chat.id), now):
+            return  # under the limit — proceed to the real handlers
+
+        # Over the limit. Reply once per cooldown, then stop the update.
+        last = last_notice.get(chat.id)
+        if last is None or now - last >= _RATE_LIMIT_NOTICE_COOLDOWN_SECONDS:
+            last_notice[chat.id] = now
+            minutes = max(1, round(rate_limit_window_seconds / 60))
+            text = _RATE_LIMITED_MESSAGE.format(max=rate_limit_max, minutes=minutes)
+            message = update.effective_message
+            try:
+                if message is not None:
+                    await message.reply_text(
+                        text, parse_mode="HTML", disable_web_page_preview=True
+                    )
+                else:
+                    await context.bot.send_message(chat_id=chat.id, text=text)
+            except Exception:  # noqa: BLE001 — never let a notice failure crash the gate
+                logger.warning("Failed to send rate-limit notice", exc_info=True)
+        raise ApplicationHandlerStop
+
     async def _on_error(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         # One bad update must not take the bot down or spam unhandled tracebacks.
         logger.error("Error handling update", exc_info=context.error)
@@ -302,6 +373,9 @@ def build_app(api: VibecampAPI, token: str):
         .build()
     )
     app.add_error_handler(_on_error)
+    # Rate-limit gate runs before everything else (lower group). One chokepoint
+    # covers free-text DMs and every command at once.
+    app.add_handler(TypeHandler(Update, _rate_limit_gate), group=-1)
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", start_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
@@ -337,8 +411,18 @@ def run() -> int:
 
     api_base = os.environ.get("VIBECAMP_API_BASE", DEFAULT_API_BASE)
     api = VibecampAPI(api_base)
-    app = build_app(api, token)
+    app = build_app(
+        api,
+        token,
+        rate_limit_max=_RATE_LIMIT_MAX,
+        rate_limit_window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
+    )
 
-    logger.info("Starting Vibe Camp Telegram bot against %s", api_base)
+    logger.info(
+        "Starting Vibe Camp Telegram bot against %s (rate limit: %d msgs / %gs per chat)",
+        api_base,
+        _RATE_LIMIT_MAX,
+        _RATE_LIMIT_WINDOW_SECONDS,
+    )
     app.run_polling()
     return 0
