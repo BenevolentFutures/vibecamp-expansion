@@ -71,8 +71,9 @@ or about to.)
 - "popular" — they ask what's most popular / best / top / most-starred. \
 (The system fills these by star count.)
 - "select" — anything else: an interest ("into AI", "live music", "something \
-spiritual"), a venue ("at the pool", "in the barn"), or a specific thing \
-("shanties", "tarot"). For this mode you choose the events.
+spiritual"), a venue ("at the pool", "in the barn"), a host ("hosted by Atin", \
+"Sarah's events" — match the `host` field), or a specific thing ("shanties", \
+"tarot"). For this mode you choose the events.
 
 For mode "select", put up to 8 matching event_ids in `event_ids`, best first. \
 Match on meaning, not just words — an AI fan should get "Let's Form a Hive \
@@ -140,6 +141,7 @@ def _compact(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_id": event.get("event_id"),
         "name": event.get("name") or "",
+        "host": event.get("creator_name") or "",
         "day": event_day(event),
         "time": event_time(event),
         "venue": event_venue(event),
