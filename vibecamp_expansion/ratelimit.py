@@ -68,6 +68,22 @@ class SlidingWindowRateLimiter:
     # ``check`` is an alias some callers prefer to read; same behaviour.
     check = allow
 
+    def would_allow(self, key: str, now: float) -> bool:
+        """Whether an event *would* be allowed now, without recording it.
+
+        Lets a caller test several limiters (e.g. a burst window and a daily
+        window) and only record the event against all of them once they all
+        agree — so a block on one tier doesn't consume allowance on another.
+        Evicting stale timestamps here is harmless (it only prunes the window).
+        """
+        cutoff = now - self.window_seconds
+        bucket = self._events.get(key)
+        if not bucket:
+            return True
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        return len(bucket) < self.max_events
+
     def prune(self, now: float) -> None:
         """Drop keys with no events left inside the current window.
 

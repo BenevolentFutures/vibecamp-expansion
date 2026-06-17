@@ -101,6 +101,45 @@ def test_prune_drops_only_stale_keys() -> None:
     assert rl.allow("fresh", now=150.0) is True
 
 
+def test_would_allow_does_not_record() -> None:
+    rl = SlidingWindowRateLimiter(max_events=1, window_seconds=100)
+    # Peeking many times never consumes the single slot.
+    assert all(rl.would_allow("chat", now=0.0) for _ in range(5))
+    # The real event is still available because nothing was recorded.
+    assert rl.allow("chat", now=0.0) is True
+    # Now the slot is taken — peek reflects it, still without recording.
+    assert rl.would_allow("chat", now=1.0) is False
+    assert rl.would_allow("chat", now=1.0) is False
+
+
+def test_two_tier_block_does_not_consume_other_tier() -> None:
+    # Models the bot's gate: a short burst window + a daily window. When the
+    # daily tier is exhausted, peeking the burst tier must not burn its budget.
+    burst = SlidingWindowRateLimiter(max_events=10, window_seconds=600)
+    daily = SlidingWindowRateLimiter(max_events=3, window_seconds=86_400)
+
+    def gate(now: float) -> bool:
+        """Return True if allowed, recording against both tiers only if so."""
+        if not burst.would_allow("chat", now):
+            return False
+        if not daily.would_allow("chat", now):
+            return False
+        burst.allow("chat", now)
+        daily.allow("chat", now)
+        return True
+
+    # 3 allowed (daily cap), close together so all 3 sit in the burst window.
+    assert gate(now=0.0) is True
+    assert gate(now=1.0) is True
+    assert gate(now=2.0) is True
+    # 4th is blocked by the daily cap, while the burst tier still has room.
+    assert gate(now=3.0) is False
+    # The blocked peek did NOT record against burst: it still holds exactly the
+    # 3 allowed events (7 of its 10 slots free), not 4.
+    assert len(burst._events["chat"]) == 3
+    assert burst.max_events - len(burst._events["chat"]) == 7
+
+
 def test_invalid_config_rejected() -> None:
     with pytest.raises(ValueError):
         SlidingWindowRateLimiter(max_events=0, window_seconds=600)

@@ -37,7 +37,7 @@ from .bot_api import (
 
 logger = logging.getLogger(__name__)
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # Reasoning effort for the concierge. Adaptive thinking is always on (it lets the
 # model reason about multi-constraint requests before choosing); effort tunes how
@@ -49,8 +49,11 @@ EFFORT = os.environ.get("ANTHROPIC_EFFORT", "medium")
 _CANDIDATE_LIMIT = 250
 _RESULT_LIMIT = 20
 
-# Truncate each candidate's description to keep the prompt compact.
-_DESC_CHARS = 200
+# Truncate each candidate's description to keep the prompt compact. Descriptions
+# dominate the cached event-pool token count, so this is the main cost lever —
+# 80 chars is enough for the model to disambiguate intent without paying for full
+# blurbs on every event. (~halves the pool's tokens vs. 200.)
+_DESC_CHARS = 80
 
 _SYSTEM = """\
 You are the concierge for the Vibe Camp festival schedule. Given a guest's \

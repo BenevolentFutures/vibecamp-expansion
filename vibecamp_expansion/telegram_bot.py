@@ -49,6 +49,12 @@ _RATE_LIMIT_WINDOW_SECONDS = float(
     os.environ.get("TELEGRAM_RATE_LIMIT_WINDOW_SECONDS", "600")
 )
 
+# Second tier: a per-user daily cap (rolling 24h) on top of the burst limit
+# above, to bound a single user's total cost over a day. Configurable max; the
+# window is fixed at one day.
+_RATE_LIMIT_DAILY_MAX = int(os.environ.get("TELEGRAM_RATE_LIMIT_DAILY_MAX", "50"))
+_RATE_LIMIT_DAILY_WINDOW_SECONDS = 86_400.0
+
 # Don't re-send the "slow down" reply on every blocked update — once a chat is
 # over the limit it may keep firing. Send it at most once per this cooldown.
 _RATE_LIMIT_NOTICE_COOLDOWN_SECONDS = 60.0
@@ -56,6 +62,12 @@ _RATE_LIMIT_NOTICE_COOLDOWN_SECONDS = 60.0
 _RATE_LIMITED_MESSAGE = (
     "🏕️ You're moving fast! I can take about {max} questions every "
     "{minutes} minutes — give me a couple of minutes and ask again."
+)
+
+_RATE_LIMITED_DAILY_MESSAGE = (
+    "🏕️ You've reached your daily limit of about {max} questions. It resets "
+    "over the next day — check back later! Meanwhile the full schedule is at "
+    "my.vibe.camp."
 )
 
 # Telegram's hard limit on a single message body.
@@ -160,6 +172,8 @@ def build_app(
     *,
     rate_limit_max: int = _RATE_LIMIT_MAX,
     rate_limit_window_seconds: float = _RATE_LIMIT_WINDOW_SECONDS,
+    rate_limit_daily_max: int = _RATE_LIMIT_DAILY_MAX,
+    rate_limit_daily_window_seconds: float = _RATE_LIMIT_DAILY_WINDOW_SECONDS,
 ):
     """Construct the Telegram ``Application`` and register all handlers.
 
@@ -187,6 +201,9 @@ def build_app(
     # chat is over the limit we reply once per cooldown and stop the update from
     # reaching any real handler — so the paid LLM call never runs for a spammer.
     limiter = SlidingWindowRateLimiter(rate_limit_max, rate_limit_window_seconds)
+    daily_limiter = SlidingWindowRateLimiter(
+        rate_limit_daily_max, rate_limit_daily_window_seconds
+    )
     last_notice: dict[int, float] = {}
 
     async def _post_shutdown(_app) -> None:
@@ -336,15 +353,26 @@ def build_app(
         if chat is None:
             return  # nothing to key on; let normal handling proceed
         now = time.time()
-        if limiter.allow(str(chat.id), now):
-            return  # under the limit — proceed to the real handlers
+        key = str(chat.id)
 
-        # Over the limit. Reply once per cooldown, then stop the update.
+        # Check both tiers without recording, so a block on one doesn't consume
+        # allowance on the other. Burst (short window) is checked first; the
+        # daily cap is the backstop against sustained, paced abuse.
+        if not limiter.would_allow(key, now):
+            minutes = max(1, round(rate_limit_window_seconds / 60))
+            text = _RATE_LIMITED_MESSAGE.format(max=rate_limit_max, minutes=minutes)
+        elif not daily_limiter.would_allow(key, now):
+            text = _RATE_LIMITED_DAILY_MESSAGE.format(max=rate_limit_daily_max)
+        else:
+            # Under both limits — record against both and proceed.
+            limiter.allow(key, now)
+            daily_limiter.allow(key, now)
+            return
+
+        # Over a limit. Reply once per cooldown, then stop the update.
         last = last_notice.get(chat.id)
         if last is None or now - last >= _RATE_LIMIT_NOTICE_COOLDOWN_SECONDS:
             last_notice[chat.id] = now
-            minutes = max(1, round(rate_limit_window_seconds / 60))
-            text = _RATE_LIMITED_MESSAGE.format(max=rate_limit_max, minutes=minutes)
             message = update.effective_message
             try:
                 if message is not None:
@@ -416,13 +444,17 @@ def run() -> int:
         token,
         rate_limit_max=_RATE_LIMIT_MAX,
         rate_limit_window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
+        rate_limit_daily_max=_RATE_LIMIT_DAILY_MAX,
+        rate_limit_daily_window_seconds=_RATE_LIMIT_DAILY_WINDOW_SECONDS,
     )
 
     logger.info(
-        "Starting Vibe Camp Telegram bot against %s (rate limit: %d msgs / %gs per chat)",
+        "Starting Vibe Camp Telegram bot against %s "
+        "(rate limit: %d msgs / %gs burst, %d msgs / day per chat)",
         api_base,
         _RATE_LIMIT_MAX,
         _RATE_LIMIT_WINDOW_SECONDS,
+        _RATE_LIMIT_DAILY_MAX,
     )
     app.run_polling()
     return 0
