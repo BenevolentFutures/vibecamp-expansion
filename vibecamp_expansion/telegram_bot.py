@@ -17,6 +17,7 @@ Run with ``vibecamp telegram`` (see ``cli.py``).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import logging
 import os
@@ -36,8 +37,27 @@ from .bot_api import (
     now_feed,
     truncate,
 )
+from .analytics import Analytics
 from .bot_llm import curate
 from .ratelimit import SlidingWindowRateLimiter
+
+# Usage analytics. Counts are in-memory by default (reset on redeploy) but
+# persist across restarts if VIBECAMP_ANALYTICS_PATH points at durable storage.
+_ANALYTICS_PATH = os.environ.get("VIBECAMP_ANALYTICS_PATH")
+# Log a summary + persist every this many messages, so growth is visible in the
+# deploy logs even without anyone running /stats.
+_ANALYTICS_FLUSH_EVERY = 25
+# Optional admin allow-list for /stats (comma-separated chat ids). If unset,
+# /stats is open to anyone (it's cheap and undocumented).
+_ADMIN_IDS = {
+    s.strip() for s in os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",") if s.strip()
+}
+
+
+def _user_key(chat_id: int) -> str:
+    """A stable, opaque hash of a chat id — for counting unique users without
+    ever storing the raw id (no PII)."""
+    return hashlib.sha256(str(chat_id).encode()).hexdigest()[:16]
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +194,7 @@ def build_app(
     rate_limit_window_seconds: float = _RATE_LIMIT_WINDOW_SECONDS,
     rate_limit_daily_max: int = _RATE_LIMIT_DAILY_MAX,
     rate_limit_daily_window_seconds: float = _RATE_LIMIT_DAILY_WINDOW_SECONDS,
+    analytics_path: "str | None" = _ANALYTICS_PATH,
 ):
     """Construct the Telegram ``Application`` and register all handlers.
 
@@ -205,6 +226,20 @@ def build_app(
         rate_limit_daily_max, rate_limit_daily_window_seconds
     )
     last_notice: dict[int, float] = {}
+
+    # Usage analytics — unique users + message counts. Loaded from disk if a
+    # durable path is configured, else fresh in-memory.
+    analytics = Analytics.load(analytics_path) if analytics_path else Analytics()
+
+    def _flush_analytics() -> None:
+        """Log a summary and persist (if configured). Cheap; safe to call often."""
+        s = analytics.summary()
+        logger.info(
+            "analytics: users=%d messages=%d rate_limited=%d by_kind=%s",
+            s["unique_users"], s["total_messages"], s["rate_limited"], s["by_kind"],
+        )
+        if analytics_path:
+            analytics.save(analytics_path)
 
     async def _post_shutdown(_app) -> None:
         await api.aclose()
@@ -341,6 +376,27 @@ def build_app(
         title = curated["framing"] or f"Picks for: {truncate(interest, 100)}"
         await _reply(update, _render_list(title, results, empty=""))
 
+    async def stats_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Report usage analytics (how many people have used the bot)."""
+        chat = update.effective_chat
+        if _ADMIN_IDS and (chat is None or str(chat.id) not in _ADMIN_IDS):
+            await _reply(update, _HELP)  # not an admin — treat like an unknown cmd
+            return
+        s = analytics.summary()
+        lines = [
+            "📊 <b>Bot usage</b>",
+            f"Unique users: <b>{s['unique_users']}</b>",
+            f"Total messages: <b>{s['total_messages']}</b>",
+            f"Rate-limited requests: {s['rate_limited']}",
+            f"Uptime: {s['uptime_seconds'] / 3600:.1f}h",
+        ]
+        if s["by_kind"]:
+            top = ", ".join(f"{k} {v}" for k, v in list(s["by_kind"].items())[:6])
+            lines.append(f"By type: {_esc(top)}")
+        if not analytics_path:
+            lines.append("<i>(counts reset on redeploy — no durable store configured)</i>")
+        await _reply(update, "\n".join(lines))
+
     async def _rate_limit_gate(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Pre-check every update against the per-chat rate limit.
 
@@ -354,6 +410,7 @@ def build_app(
             return  # nothing to key on; let normal handling proceed
         now = time.time()
         key = str(chat.id)
+        user = _user_key(chat.id)
 
         # Check both tiers without recording, so a block on one doesn't consume
         # allowance on the other. Burst (short window) is checked first; the
@@ -361,12 +418,20 @@ def build_app(
         if not limiter.would_allow(key, now):
             minutes = max(1, round(rate_limit_window_seconds / 60))
             text = _RATE_LIMITED_MESSAGE.format(max=rate_limit_max, minutes=minutes)
+            analytics.record_rate_limited(user)
         elif not daily_limiter.would_allow(key, now):
             text = _RATE_LIMITED_DAILY_MESSAGE.format(max=rate_limit_daily_max)
+            analytics.record_rate_limited(user)
         else:
             # Under both limits — record against both and proceed.
             limiter.allow(key, now)
             daily_limiter.allow(key, now)
+            # Analytics: classify the request and tally it.
+            raw = (update.effective_message.text or "") if update.effective_message else ""
+            kind = raw[1:].split()[0].lower() if raw.startswith("/") else "text"
+            is_new = analytics.record(user, kind or "text")
+            if is_new or analytics.total % _ANALYTICS_FLUSH_EVERY == 0:
+                _flush_analytics()
             return
 
         # Over a limit. Reply once per cooldown, then stop the update.
@@ -414,6 +479,7 @@ def build_app(
     app.add_handler(CommandHandler("popular", popular_cmd))
     app.add_handler(CommandHandler("recommend", recommend_cmd))
     app.add_handler(CommandHandler("event", event_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))  # usage analytics (undocumented)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     return app
 
@@ -446,6 +512,7 @@ def run() -> int:
         rate_limit_window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
         rate_limit_daily_max=_RATE_LIMIT_DAILY_MAX,
         rate_limit_daily_window_seconds=_RATE_LIMIT_DAILY_WINDOW_SECONDS,
+        analytics_path=_ANALYTICS_PATH,
     )
 
     logger.info(
