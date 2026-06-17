@@ -31,6 +31,7 @@ from . import __version__, config
 # Reuse the REST app directly — it already carries every REST route plus the
 # /data static mount. We attach a lifespan and graft the MCP endpoint onto it.
 from .api import app
+from .calendar_view import calendar_html
 from .crawler import crawl_loop
 from .landing import landing_html
 from .mcp_server import mcp
@@ -116,6 +117,12 @@ async def root(request: Request):
     if "text/html" in accept:
         return HTMLResponse(landing_html(base, config.CURRENT_EDITION_NAME))
     return JSONResponse(info)
+
+
+@app.get("/calendar", include_in_schema=False)
+async def calendar() -> HTMLResponse:
+    """Vertical, chronological schedule view for humans."""
+    return HTMLResponse(calendar_html(config.CURRENT_EDITION_NAME))
 
 
 # Friendly redirect so clients configured with the bare /mcp still reach the

@@ -50,6 +50,7 @@ def landing_html(base_url: str, edition: str | None = None) -> str:
   <p class="lead">An agent-friendly view of the Vibe Camp schedule. Point your AI at the URL
   below and just <em>talk to it</em> — "what's on at the Pool Saturday night?", "I'm into
   consciousness and AI, what should I go to?"</p>
+  <p><a href="{base}/calendar" style="font-size:1.05rem">📅 Browse the full schedule →</a></p>
   <p>
     <span class="pill">{edition}</span>
     <span class="pill">read-only</span>
