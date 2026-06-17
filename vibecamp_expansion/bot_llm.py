@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 
+# Reasoning effort for the concierge. Adaptive thinking is always on (it lets the
+# model reason about multi-constraint requests before choosing); effort tunes how
+# hard it thinks. "medium" balances quality against chat latency — raise to
+# "high"/"xhigh" via env for sharper picks at the cost of a few more seconds.
+EFFORT = os.environ.get("ANTHROPIC_EFFORT", "medium")
+
 # Size of the candidate pool handed to the model, and of the returned list.
 _CANDIDATE_LIMIT = 250
 _RESULT_LIMIT = 8
@@ -183,13 +189,16 @@ async def smart_select(
     try:
         resp = await client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=8000,  # headroom for adaptive thinking + the small JSON answer
             system=[
                 {"type": "text", "text": _SYSTEM},
                 {"type": "text", "text": events_block, "cache_control": {"type": "ephemeral"}},
             ],
             messages=[{"role": "user", "content": f"Guest message: {query}"}],
-            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
+            # Adaptive thinking lets the model reason about multi-constraint asks
+            # before committing to picks; effort tunes depth vs. chat latency.
+            thinking={"type": "adaptive"},
+            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}, "effort": EFFORT},
         )
     except Exception:  # noqa: BLE001 — any API failure degrades to the fallback
         logger.exception("smart_select LLM call failed; using keyword fallback")

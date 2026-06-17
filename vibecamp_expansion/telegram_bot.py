@@ -16,6 +16,7 @@ Run with ``vibecamp telegram`` (see ``cli.py``).
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
@@ -127,6 +128,7 @@ def build_app(api: VibecampAPI, token: str):
     so this module imports without python-telegram-bot installed (e.g. for
     byte-compile checks). The API client is closed on shutdown.
     """
+    from telegram.constants import ChatAction
     from telegram.ext import (
         Application,
         CommandHandler,
@@ -141,11 +143,33 @@ def build_app(api: VibecampAPI, token: str):
     async def _reply(update, text: str) -> None:
         await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
+    async def _with_typing(update, coro):
+        """Await ``coro`` while showing Telegram's "typing…" bubble.
+
+        The chat action expires after ~5s, so we re-send it on a short loop until
+        the work (often a multi-second LLM call) finishes.
+        """
+        chat = update.effective_chat
+
+        async def _pulse() -> None:
+            try:
+                while True:
+                    await chat.send_action(ChatAction.TYPING)
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+
+        pulse = asyncio.create_task(_pulse())
+        try:
+            return await coro
+        finally:
+            pulse.cancel()
+
     async def start_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         await _reply(update, _HELP)
 
     async def now_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
-        feed = now_feed(await api.search_events(sort="start", limit=_CANDIDATE_POOL))
+        feed = now_feed(await _with_typing(update, api.search_events(sort="start", limit=_CANDIDATE_POOL)))
         title = (
             "Happening now" if feed["live"]
             else "Nothing this minute — coming up next"
@@ -235,7 +259,8 @@ def build_app(api: VibecampAPI, token: str):
         await _recommend_reply(update, interest)
 
     async def _recommend_reply(update, interest: str) -> None:
-        curated = await curate(api, interest)
+        # The concierge call takes a few seconds (it now thinks) — show "typing…".
+        curated = await _with_typing(update, curate(api, interest))
         results = curated["events"]
         if not results:
             await _reply(
