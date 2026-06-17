@@ -25,7 +25,7 @@ DEFAULT_API_BASE = "https://vibecamp-expansion-production.up.railway.app"
 # How many results list-style commands show. Telegram's real ceiling is the
 # 4096-char message body (~20+ compact events); the renderer trims to fit and
 # notes any overflow, so this can be generous without breaking a message.
-LIST_LIMIT = 20
+LIST_LIMIT = 10
 
 STAR = "⭐"  # output reads "5 ⭐" everywhere
 

@@ -87,7 +87,7 @@ EFFORT = os.environ.get("ANTHROPIC_EFFORT", "medium")
 
 # Size of the candidate pool handed to the model, and of the returned list.
 _CANDIDATE_LIMIT = 250
-_RESULT_LIMIT = 20
+_RESULT_LIMIT = 10
 
 # Truncate each candidate's description to keep the prompt compact. Descriptions
 # dominate the cached event-pool token count, so this is the main cost lever —
@@ -125,7 +125,7 @@ time order — even when phrased as "what's happening Friday" or "what's on \
 Saturday". Do NOT use "now" or "upcoming" when the guest names a weekday; those \
 ignore the day and would wrongly return the next events from right now.
 
-For mode "select", put up to 20 matching event_ids in `event_ids`, best first. \
+For mode "select", put up to 10 matching event_ids in `event_ids`, best first. \
 Match on meaning, not just words — an AI fan should get "Let's Form a Hive \
 Mind!" or "Claude Squad" even though they don't contain "AI". Be strict: only \
 include events with a clear, direct connection to the request, and omit \
@@ -173,7 +173,7 @@ _SCHEMA = {
         "event_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "For mode 'select': chosen event_ids, best first, max 20.",
+            "description": "For mode 'select': chosen event_ids, best first, max 10.",
         },
     },
     "required": ["interpretation", "mode", "sort", "framing", "event_ids"],
