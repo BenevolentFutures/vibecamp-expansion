@@ -25,7 +25,7 @@ from .bot_api import VibecampAPI, event_day, event_time, event_venue, event_star
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-4-8"
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 
 # Size of the candidate pool handed to the model, and of the returned list.
 _CANDIDATE_LIMIT = 250
@@ -166,6 +166,11 @@ async def smart_select(
     # Temporal and popularity intents are answered deterministically — the model
     # is unreliable at time-sorting and we already have authoritative orderings.
     mode = parsed.get("mode", "select")
+    # Observability: confirm the brain ran and how it read the request. Logs the
+    # classification only — never the events or any secret.
+    logger.info(
+        "smart_select mode=%s interpretation=%s", mode, parsed.get("interpretation", "")
+    )
     if mode == "upcoming":
         ordered = await api.search_events(
             start_after=now.isoformat(timespec="seconds"), sort="start", limit=_RESULT_LIMIT

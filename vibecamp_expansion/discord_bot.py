@@ -245,6 +245,11 @@ def run() -> int:
     guild_raw = os.environ.get("DISCORD_GUILD_ID")
     guild_id = int(guild_raw) if guild_raw and guild_raw.isdigit() else None
 
+    # Quiet HTTP-client/library loggers to WARNING so request URLs (which can
+    # carry the bot token) never land in logs at INFO.
+    for noisy in ("httpx", "httpcore", "discord", "discord.http"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     api = VibecampAPI(api_base)
     bot = build_bot(api, guild_id=guild_id)
 

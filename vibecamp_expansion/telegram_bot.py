@@ -240,6 +240,11 @@ def run() -> int:
         )
         return 1
 
+    # python-telegram-bot / httpx log the full getUpdates URL — which embeds the
+    # bot token — at INFO. Quiet them to WARNING so the token never lands in logs.
+    for noisy in ("httpx", "httpcore", "telegram", "telegram.ext"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     api_base = os.environ.get("VIBECAMP_API_BASE", DEFAULT_API_BASE)
     api = VibecampAPI(api_base)
     app = build_app(api, token)
