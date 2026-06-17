@@ -36,25 +36,27 @@ _DESC_CHARS = 200
 
 _SYSTEM = """\
 You are the concierge for the Vibe Camp festival schedule. Given a guest's \
-message and the full list of scheduled events, pick the events that best answer \
-them, best first.
+message and the full list of scheduled events, classify the request and pick \
+the events that best answer it.
 
-Interpret the intent:
-- "next" / "what's happening now/soon" -> the events starting soonest at or \
-after CURRENT_TIME, in chronological order. Never return events that already \
-ended long ago when they ask what's next.
-- "popular" / "what's good" -> the highest-starred events.
-- a venue (e.g. "at the pool", "barn") -> events at that venue.
-- an interest ("into AI", "live music", "something spiritual") -> events whose \
-name or description genuinely match that interest, even when the words differ \
-(e.g. an AI fan would want "Let's Form a Hive Mind!" or "Claude Squad"). Prefer \
-relevance over star count, but use stars to break ties.
-- a specific thing ("shanties", "tarot") -> events about that.
+Set `mode`:
+- "upcoming" — they ask what's next / happening now / soon / later today. \
+(You don't need to choose events for this; the system fills them by time.)
+- "popular" — they ask what's most popular / best / top / most-starred. \
+(The system fills these by star count.)
+- "select" — anything else: an interest ("into AI", "live music", "something \
+spiritual"), a venue ("at the pool", "in the barn"), or a specific thing \
+("shanties", "tarot"). For this mode you choose the events.
 
-Return up to 8 event_ids that actually exist in the provided list, ordered best \
-first. If nothing genuinely fits, return an empty list rather than padding with \
-unrelated popular events. Write `framing` as one short, plain sentence \
-introducing the picks (no emoji, no hype)."""
+For mode "select", put up to 8 matching event_ids in `event_ids`, best first. \
+Match on meaning, not just words — an AI fan should get "Let's Form a Hive \
+Mind!" or "Claude Squad" even though they don't contain "AI". Be strict: only \
+include events with a clear, direct connection to the request, and omit \
+loosely-related or merely-popular filler. If nothing genuinely fits, return an \
+empty list. For "upcoming" and "popular", leave `event_ids` empty.
+
+Write `framing` as one short, plain sentence introducing the picks (no emoji, \
+no hype)."""
 
 _SCHEMA = {
     "type": "object",
@@ -63,6 +65,11 @@ _SCHEMA = {
             "type": "string",
             "description": "One short sentence: what the guest is asking for.",
         },
+        "mode": {
+            "type": "string",
+            "enum": ["upcoming", "popular", "select"],
+            "description": "upcoming/popular are filled deterministically; select uses event_ids.",
+        },
         "framing": {
             "type": "string",
             "description": "One plain sentence introducing the picks, shown to the guest.",
@@ -70,10 +77,10 @@ _SCHEMA = {
         "event_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Selected event_ids, best first, max 8. Empty if nothing fits.",
+            "description": "For mode 'select': chosen event_ids, best first, max 8.",
         },
     },
-    "required": ["interpretation", "framing", "event_ids"],
+    "required": ["interpretation", "mode", "framing", "event_ids"],
     "additionalProperties": False,
 }
 
@@ -147,7 +154,7 @@ async def smart_select(
         logger.exception("smart_select LLM call failed; using keyword fallback")
         return None
     finally:
-        await client.aclose()
+        await client.close()
 
     text = next((b.text for b in resp.content if b.type == "text"), "")
     try:
@@ -156,7 +163,18 @@ async def smart_select(
         logger.warning("smart_select returned non-JSON; using keyword fallback")
         return None
 
-    ordered = [by_id[i] for i in parsed.get("event_ids", []) if i in by_id][:_RESULT_LIMIT]
+    # Temporal and popularity intents are answered deterministically — the model
+    # is unreliable at time-sorting and we already have authoritative orderings.
+    mode = parsed.get("mode", "select")
+    if mode == "upcoming":
+        ordered = await api.search_events(
+            start_after=now.isoformat(timespec="seconds"), sort="start", limit=_RESULT_LIMIT
+        )
+    elif mode == "popular":
+        ordered = await api.search_events(sort="stars", limit=_RESULT_LIMIT)
+    else:
+        ordered = [by_id[i] for i in parsed.get("event_ids", []) if i in by_id][:_RESULT_LIMIT]
+
     return {
         "events": ordered,
         "framing": parsed.get("framing", ""),

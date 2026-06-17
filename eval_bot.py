@@ -44,7 +44,9 @@ async def _judge(query: str, events: list[dict[str, Any]]) -> dict[str, Any]:
     from anthropic import AsyncAnthropic
 
     listing = "\n".join(
-        f"- {e['name']} :: {(e.get('description') or '')[:160]}" for e in events
+        f"- {e['name']} | {e.get('start_date')} {e['start_datetime'].split('T')[1][:5]} "
+        f"| {e.get('location')} | {event_stars(e)} stars :: {(e.get('description') or '')[:140]}"
+        for e in events
     ) or "(no results)"
     schema = {
         "type": "object",
@@ -62,14 +64,17 @@ async def _judge(query: str, events: list[dict[str, Any]]) -> dict[str, Any]:
             model=JUDGE_MODEL,
             max_tokens=512,
             system="You are a strict evaluator of an event-recommendation bot. "
-            "Judge whether the returned events genuinely answer the guest's "
-            "message. Reward on-intent relevance; penalize generic popular "
-            "events that ignore the ask.",
+            "Each result line shows name | date time | venue | stars. Judge "
+            "whether the returned events genuinely answer the guest's message. "
+            "For 'next/soon' asks, check the date+time columns show the soonest "
+            "upcoming events in order. For 'most popular' asks, check the stars "
+            "column is high. For interests/venues, reward on-intent relevance "
+            "and penalize off-topic or generic-popular filler.",
             messages=[{"role": "user", "content": f"Guest asked: {query!r}\n\nBot returned:\n{listing}"}],
             output_config={"format": {"type": "json_schema", "schema": schema}},
         )
     finally:
-        await client.aclose()
+        await client.close()
     text = next((b.text for b in resp.content if b.type == "text"), "{}")
     return json.loads(text)
 
