@@ -272,7 +272,22 @@ def build_app(api: VibecampAPI, token: str):
         title = curated["framing"] or f"Picks for: {truncate(interest, 100)}"
         await _reply(update, _render_list(title, results, empty=""))
 
-    app = Application.builder().token(token).post_shutdown(_post_shutdown).build()
+    async def _on_error(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        # One bad update must not take the bot down or spam unhandled tracebacks.
+        logger.error("Error handling update", exc_info=context.error)
+
+    # concurrent_updates lets many users be served in parallel — essential now
+    # that each free-text reply makes a multi-second LLM call. Without it,
+    # python-telegram-bot processes updates one at a time and users queue behind
+    # each other's concierge calls.
+    app = (
+        Application.builder()
+        .token(token)
+        .concurrent_updates(True)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+    app.add_error_handler(_on_error)
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", start_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
