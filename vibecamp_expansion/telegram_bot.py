@@ -30,6 +30,8 @@ from .bot_api import (
     event_stars,
     event_time,
     event_venue,
+    future_filter,
+    now_feed,
     truncate,
 )
 from .bot_llm import curate
@@ -39,13 +41,23 @@ logger = logging.getLogger(__name__)
 # Telegram's hard limit on a single message body.
 _MESSAGE_LIMIT = 4096
 
+# Pull the whole edition (it's small) so "most popular" ranks by stars *after*
+# dropping events that are already over, rather than letting the API's star-sort
+# surface a finished crowd-favourite.
+_CANDIDATE_POOL = 250
+
 _HELP = (
     "🏕️ <b>Vibe Camp schedule bot</b>\n"
-    "Just message me what you're into and I'll suggest events. Or use:\n\n"
+    "Two great things to ask me:\n\n"
+    "⭐ <b>“what's coming up soon?”</b> — what's on right now &amp; next\n"
+    "⭐ <b>“what's good for someone into ___?”</b> — picks for your interest\n\n"
+    "You can also just say a day (Thursday–Sunday), a vibe, or a place "
+    "and I'll find events. Commands:\n\n"
+    "/now — what's happening right now\n"
     "/events &lt;text&gt; — search the schedule\n"
     "/pool — events at the Pool\n"
     "/shanties — find the sea shanties\n"
-    "/day &lt;YYYY-MM-DD&gt; — a day's schedule\n"
+    "/day &lt;Thu–Sun&gt; — a day's schedule\n"
     "/popular — top events by stars\n"
     "/recommend &lt;interest&gt; — curated picks\n"
     "/event &lt;id&gt; — full detail for one event\n"
@@ -132,6 +144,17 @@ def build_app(api: VibecampAPI, token: str):
     async def start_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         await _reply(update, _HELP)
 
+    async def now_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        feed = now_feed(await api.search_events(sort="start", limit=_CANDIDATE_POOL))
+        title = (
+            "Happening now" if feed["live"]
+            else "Nothing this minute — coming up next"
+        )
+        await _reply(
+            update,
+            _render_list(title, feed["events"], empty="Nothing on the schedule right now."),
+        )
+
     async def events_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         query = " ".join(context.args).strip()
         if not query:
@@ -144,34 +167,46 @@ def build_app(api: VibecampAPI, token: str):
         )
 
     async def pool_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
-        results = await api.search_events(site="Pool", sort="stars", limit=LIST_LIMIT)
+        results = future_filter(await api.search_events(site="Pool", sort="start", limit=25))
         await _reply(
-            update, _render_list("Pool events", results, empty="Nothing at the Pool right now.")
+            update,
+            _render_list("Pool events", results[:LIST_LIMIT], empty="Nothing coming up at the Pool."),
         )
 
     async def shanties_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
-        results = await api.search_events(q="shanty", sort="stars", limit=LIST_LIMIT)
+        results = future_filter(await api.search_events(q="shanty", sort="start", limit=25))
         await _reply(
-            update, _render_list("Shanties", results, empty="No shanties found... yet.")
+            update,
+            _render_list("Shanties", results[:LIST_LIMIT], empty="No shanties coming up... yet."),
         )
 
     async def day_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
-        target = (context.args[0] if context.args else None) or await api.first_festival_day()
+        ref = context.args[0] if context.args else None
+        target = await api.resolve_day(ref)
         if not target:
-            await _reply(update, "No schedule days are available yet.")
+            await _reply(
+                update,
+                "I didn't recognise that day. Try a weekday, e.g. /day Friday "
+                "(camp runs Thursday–Sunday).",
+            )
             return
         results = await api.search_events(day=target, sort="start", limit=25)
+        label = event_day({"start_date": target})  # weekday name for the title
         await _reply(
             update,
             _render_list(
-                f"Schedule for {target}", results, empty=f"No events scheduled on {target}."
+                f"Schedule for {label}", results, empty=f"No events scheduled on {label}."
             ),
         )
 
     async def popular_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
-        results = await api.search_events(sort="stars", limit=LIST_LIMIT)
+        results = future_filter(await api.search_events(sort="start", limit=_CANDIDATE_POOL))
+        results.sort(key=event_stars, reverse=True)
         await _reply(
-            update, _render_list("Most-starred events", results, empty="No events available.")
+            update,
+            _render_list(
+                "Most-starred upcoming events", results[:LIST_LIMIT], empty="No events available."
+            ),
         )
 
     async def recommend_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
@@ -215,6 +250,7 @@ def build_app(api: VibecampAPI, token: str):
     app = Application.builder().token(token).post_shutdown(_post_shutdown).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", start_cmd))
+    app.add_handler(CommandHandler("now", now_cmd))
     app.add_handler(CommandHandler("events", events_cmd))
     app.add_handler(CommandHandler("pool", pool_cmd))
     app.add_handler(CommandHandler("shanties", shanties_cmd))

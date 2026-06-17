@@ -22,7 +22,13 @@ import os
 import sys
 from typing import Any
 
-from vibecamp_expansion.bot_api import VibecampAPI, DEFAULT_API_BASE, event_stars
+from vibecamp_expansion.bot_api import (
+    DEFAULT_API_BASE,
+    VibecampAPI,
+    event_stars,
+    is_future,
+    now_local,
+)
 from vibecamp_expansion.bot_llm import curate
 
 API_BASE = os.environ.get("VIBECAMP_API_BASE", DEFAULT_API_BASE)
@@ -66,11 +72,18 @@ async def _judge(query: str, events: list[dict[str, Any]]) -> dict[str, Any]:
             system="You are a strict evaluator of an event-recommendation bot. "
             "Each result line shows name | date time | venue | stars. Judge "
             "whether the returned events genuinely answer the guest's message. "
-            "For 'next/soon' asks, check the date+time columns show the soonest "
-            "upcoming events in order. For 'most popular' asks, check the stars "
-            "column is high. For interests/venues, reward on-intent relevance "
-            "and penalize off-topic or generic-popular filler.",
-            messages=[{"role": "user", "content": f"Guest asked: {query!r}\n\nBot returned:\n{listing}"}],
+            "For 'now/next/soon' asks, the bot only has access to future and "
+            "currently-running events; use CURRENT_TIME to confirm the picks are "
+            "the soonest upcoming ones in chronological order — do NOT penalise it "
+            "for showing later days when little is on right now (camp is quiet at "
+            "some hours). For 'most popular' asks, check the stars column is high. "
+            "For interests/venues, reward on-intent relevance and penalize "
+            "off-topic or generic-popular filler.",
+            messages=[{
+                "role": "user",
+                "content": f"CURRENT_TIME: {now_local().strftime('%A %Y-%m-%d %H:%M')} (Eastern)\n\n"
+                f"Guest asked: {query!r}\n\nBot returned:\n{listing}",
+            }],
             output_config={"format": {"type": "json_schema", "schema": schema}},
         )
     finally:
@@ -91,10 +104,15 @@ async def main() -> int:
         next_q = "hey whats the next event?"
         ai_q = "whats the events that would be best for me, interested in ai?"
 
+        now_q = "what's happening right now?"
+        pool_pop_q = "what's popular at the pool?"
+
         results: dict[str, list[dict[str, Any]]] = {}
         for q in [
             next_q,
             ai_q,
+            now_q,
+            pool_pop_q,
             "anything at the pool?",
             "find me the sea shanties",
             "what are the most popular events?",
@@ -132,6 +150,26 @@ async def main() -> int:
         pop = results["what are the most popular events?"]
         if pop and pop[0]["event_id"] not in top5:
             failures.append("'most popular' top result is not in the global top-5 by stars")
+        # 6. HARD RULE: no query may ever surface an event that's already over
+        #    (ended more than an hour ago). This is the "only future" guarantee.
+        now = now_local()
+        for q, evs in results.items():
+            stale = [e["name"] for e in evs if not is_future(e, now)]
+            if stale:
+                failures.append(f"stale (past) events shown for {q!r}: {stale}")
+        # 7. "Happening right now" is ordered by start time (soonest first).
+        now_evs = results[now_q]
+        now_starts = [e.get("start_datetime") or "" for e in now_evs]
+        if now_evs and now_starts != sorted(now_starts):
+            failures.append("'happening right now' results are not in chronological order")
+        # 8. "Popular at the pool" is Pool-only and ordered by stars descending.
+        pp = results[pool_pop_q]
+        non_pool = [e["name"] for e in pp if e.get("location") != "Pool"]
+        if pp and non_pool:
+            failures.append(f"'popular at the pool' returned non-Pool events: {non_pool}")
+        pp_stars = [event_stars(e) for e in pp]
+        if pp_stars != sorted(pp_stars, reverse=True):
+            failures.append(f"'popular at the pool' not sorted by stars desc: {pp_stars}")
 
         # --- LLM-judge checks -------------------------------------------- #
         print("\n=== LLM judge ===")

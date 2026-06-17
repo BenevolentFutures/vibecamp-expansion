@@ -31,9 +31,15 @@ from .bot_api import (
     event_stars,
     event_time,
     event_venue,
+    future_filter,
+    now_feed,
     truncate,
 )
 from .bot_llm import curate
+
+# Pull the whole edition (it's small) so "most popular" ranks by stars *after*
+# dropping events that are already over.
+_CANDIDATE_POOL = 250
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +149,19 @@ def build_bot(api: VibecampAPI, *, guild_id: Optional[int] = None):
             logger.info("Synced global commands")
         logger.info("Logged in as %s", client.user)
 
+    @tree.command(name="now", description="What's happening right now (and starting soon).")
+    async def now_cmd(interaction) -> None:  # noqa: ANN001
+        await interaction.response.defer()
+        feed = now_feed(await api.search_events(sort="start", limit=_CANDIDATE_POOL))
+        if feed["live"]:
+            title, empty = "Happening now", ""
+        else:
+            title = "Nothing this minute — coming up next"
+            empty = "Nothing on the schedule right now."
+        await interaction.followup.send(
+            embed=_new_list_embed(title, feed["events"], empty=empty)
+        )
+
     @tree.command(name="events", description="Full-text search the schedule.")
     @app_commands.describe(query="What to search for (name, description, host, venue).")
     async def events_cmd(interaction, query: str) -> None:  # noqa: ANN001
@@ -155,44 +174,49 @@ def build_bot(api: VibecampAPI, *, guild_id: Optional[int] = None):
         )
         await interaction.followup.send(embed=embed)
 
-    @tree.command(name="pool", description="Events happening at the Pool.")
+    @tree.command(name="pool", description="Upcoming events at the Pool.")
     async def pool_cmd(interaction) -> None:  # noqa: ANN001
         await interaction.response.defer()
-        results = await api.search_events(site="Pool", sort="stars", limit=LIST_LIMIT)
+        results = future_filter(await api.search_events(site="Pool", sort="start", limit=_MAX_FIELDS))
         embed = _new_list_embed(
-            "Pool events", results, empty="Nothing at the Pool right now."
+            "Pool events", results[:LIST_LIMIT], empty="Nothing coming up at the Pool."
         )
         await interaction.followup.send(embed=embed)
 
     @tree.command(name="shanties", description="Find the sea shanties.")
     async def shanties_cmd(interaction) -> None:  # noqa: ANN001
         await interaction.response.defer()
-        results = await api.search_events(q="shanty", sort="stars", limit=LIST_LIMIT)
-        embed = _new_list_embed("Shanties", results, empty="No shanties found... yet.")
+        results = future_filter(await api.search_events(q="shanty", sort="start", limit=_MAX_FIELDS))
+        embed = _new_list_embed("Shanties", results[:LIST_LIMIT], empty="No shanties coming up... yet.")
         await interaction.followup.send(embed=embed)
 
-    @tree.command(name="day", description="Events on a given day (YYYY-MM-DD).")
-    @app_commands.describe(date="Calendar day as YYYY-MM-DD; defaults to the first day.")
+    @tree.command(name="day", description="Events on a given day (e.g. Friday).")
+    @app_commands.describe(date="Weekday (Thursday–Sunday) or YYYY-MM-DD; defaults to the first day.")
     async def day_cmd(interaction, date: Optional[str] = None) -> None:  # noqa: ANN001
         await interaction.response.defer()
-        target = date or await api.first_festival_day()
+        target = await api.resolve_day(date)
         if not target:
-            await interaction.followup.send("No schedule days are available yet.")
+            await interaction.followup.send(
+                "I didn't recognise that day. Try a weekday, e.g. Friday "
+                "(camp runs Thursday–Sunday)."
+            )
             return
         results = await api.search_events(day=target, sort="start", limit=_MAX_FIELDS)
+        label = event_day({"start_date": target})
         embed = _new_list_embed(
-            f"Schedule for {target}",
+            f"Schedule for {label}",
             results,
-            empty=f"No events scheduled on {target}.",
+            empty=f"No events scheduled on {label}.",
         )
         await interaction.followup.send(embed=embed)
 
-    @tree.command(name="popular", description="Top events by stars.")
+    @tree.command(name="popular", description="Top upcoming events by stars.")
     async def popular_cmd(interaction) -> None:  # noqa: ANN001
         await interaction.response.defer()
-        results = await api.search_events(sort="stars", limit=LIST_LIMIT)
+        results = future_filter(await api.search_events(sort="start", limit=_CANDIDATE_POOL))
+        results.sort(key=event_stars, reverse=True)
         embed = _new_list_embed(
-            "Most-starred events", results, empty="No events available."
+            "Most-starred upcoming events", results[:LIST_LIMIT], empty="No events available."
         )
         await interaction.followup.send(embed=embed)
 

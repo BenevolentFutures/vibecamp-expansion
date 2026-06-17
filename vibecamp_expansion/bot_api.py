@@ -12,7 +12,10 @@ my.vibe.camp UI and attendees call these **stars**. Bots show "stars".
 
 from __future__ import annotations
 
+import os
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -23,6 +26,34 @@ DEFAULT_API_BASE = "https://vibecamp-expansion-production.up.railway.app"
 LIST_LIMIT = 8
 
 STAR = "⭐"  # output reads "5 ⭐" everywhere
+
+# Camp-local timezone. Every event timestamp is naive wall-clock in this zone
+# (see CLAUDE.md: upstream's trailing ``Z`` is a lie, not real UTC). The bots
+# run on a UTC host, so "now" must be converted to this zone or "what's soon"
+# would be hours off during camp. Vibe Camp runs on Eastern.
+LOCAL_TZ = os.environ.get("VIBECAMP_LOCAL_TZ", "America/New_York")
+
+# Keep showing an event until this long after it ends, so "happening right now"
+# lingers and a just-finished thing doesn't vanish mid-conversation.
+STALE_GRACE = timedelta(hours=1)
+
+# "What's happening now" — the headline feature. An event counts as "now" if it
+# started within the last NOW_LOOKBACK or starts within the next NOW_LOOKAHEAD,
+# i.e. its start time falls in [now - 15min, now + 30min]. This is the
+# just-walk-up-to-it window: things kicking off around you right this minute.
+NOW_LOOKBACK = timedelta(minutes=15)
+NOW_LOOKAHEAD = timedelta(minutes=30)
+
+# Camp is a single long weekend; people refer to days by weekday name.
+_WEEKDAY_ALIASES = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
 
 
 class VibecampAPI:
@@ -70,6 +101,30 @@ class VibecampAPI:
         days = await self.days()
         return days[0]["date"] if days else None
 
+    async def resolve_day(self, ref: Optional[str]) -> Optional[str]:
+        """Resolve a day reference to a ``YYYY-MM-DD`` calendar day.
+
+        Accepts a weekday name or abbreviation (``"Friday"``, ``"fri"``), an
+        explicit ``YYYY-MM-DD`` (passed through), or ``None`` (the first camp
+        day). Weekday names map to the matching day of the current edition.
+        Returns ``None`` if the reference can't be matched.
+        """
+        if not ref or not ref.strip():
+            return await self.first_festival_day()
+        ref = ref.strip().lower()
+        if len(ref) == 10 and ref[4] == "-" and ref[7] == "-":
+            return ref  # explicit date
+        weekday = _WEEKDAY_ALIASES.get(ref)
+        if weekday is None:
+            return None
+        for day in await self.days():
+            try:
+                if date.fromisoformat(day["date"]).weekday() == weekday:
+                    return day["date"]
+            except (ValueError, KeyError):
+                continue
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # Field accessors (work on the raw event dicts from the API)                  #
@@ -82,6 +137,130 @@ def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def now_local() -> datetime:
+    """Current wall-clock time in the camp's timezone, as a naive ``datetime``.
+
+    Event timestamps are naive local wall-clock, so "now" must be too. The bots
+    run on a UTC host; ``datetime.now()`` there would be hours ahead of camp,
+    silently breaking every "what's happening now / soon" answer.
+    """
+    return datetime.now(ZoneInfo(LOCAL_TZ)).replace(tzinfo=None)
+
+
+def event_start(event: dict[str, Any]) -> Optional[datetime]:
+    """Parse an event's naive wall-clock start, or ``None`` if unparseable."""
+    raw = event.get("start_datetime")
+    if not raw or "T" not in raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw[:19])  # drop millis + the fake ``Z``
+    except ValueError:
+        return None
+
+
+def event_end(event: dict[str, Any]) -> Optional[datetime]:
+    """Parse an event's end (start + duration), or ``None`` if no valid start."""
+    start = event_start(event)
+    if start is None:
+        return None
+    return start + timedelta(minutes=int(event.get("duration_minutes") or 0))
+
+
+def is_future(event: dict[str, Any], now: datetime, *, grace: timedelta = STALE_GRACE) -> bool:
+    """True unless the event ended more than ``grace`` ago.
+
+    Keeps still-running and recently-finished events (so "happening now" works)
+    and drops anything long over. Events with an unparseable time are kept — we
+    can't prove they're stale, and dropping them would silently lose data.
+    """
+    end = event_end(event)
+    if end is None:
+        return True
+    return end > now - grace
+
+
+def future_filter(
+    events: list[dict[str, Any]],
+    now: Optional[datetime] = None,
+    *,
+    grace: timedelta = STALE_GRACE,
+) -> list[dict[str, Any]]:
+    """Drop events that ended more than ``grace`` ago (default: 1h)."""
+    now = now or now_local()
+    return [e for e in events if is_future(e, now, grace=grace)]
+
+
+def apply_sort(events: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
+    """Order events by ``"soonest"`` (time) or ``"popular"`` (stars).
+
+    Any other value (e.g. ``"relevance"``) preserves the given order.
+    """
+    if sort == "soonest":
+        return sorted(events, key=lambda e: event_start(e) or datetime.max)
+    if sort == "popular":
+        return sorted(events, key=event_stars, reverse=True)
+    return events
+
+
+def happening_now(
+    events: list[dict[str, Any]],
+    now: Optional[datetime] = None,
+    *,
+    lookback: timedelta = NOW_LOOKBACK,
+    lookahead: timedelta = NOW_LOOKAHEAD,
+) -> list[dict[str, Any]]:
+    """Events whose start falls in ``[now - lookback, now + lookahead]``.
+
+    The "what's happening now" window: things that just started or are about to.
+    Ordered soonest-first. Events with an unparseable start are excluded (we
+    can't place them on the clock).
+    """
+    now = now or now_local()
+    lo, hi = now - lookback, now + lookahead
+    live = [e for e in events if (s := event_start(e)) is not None and lo <= s <= hi]
+    return sorted(live, key=lambda e: event_start(e) or datetime.max)
+
+
+def upcoming_events(
+    events: list[dict[str, Any]],
+    now: Optional[datetime] = None,
+    *,
+    grace: timedelta = NOW_LOOKBACK,
+) -> list[dict[str, Any]]:
+    """Events starting from ``now - grace`` onward, soonest first.
+
+    This is the right basis for "what's next / coming up": it orders by *start*
+    and drops things that began well before now. Contrast ``future_filter``,
+    which keeps anything not yet *ended* — including a multi-day installation
+    that opened yesterday and would otherwise dominate a "soonest" sort by its
+    stale start time. Events with an unparseable start are excluded.
+    """
+    now = now or now_local()
+    cutoff = now - grace
+    soon = [e for e in events if (s := event_start(e)) is not None and s >= cutoff]
+    return sorted(soon, key=lambda e: event_start(e) or datetime.max)
+
+
+def now_feed(
+    events: list[dict[str, Any]],
+    now: Optional[datetime] = None,
+    *,
+    limit: int = LIST_LIMIT,
+) -> dict[str, Any]:
+    """Resolve the "what's happening now" feed, with a graceful fallback.
+
+    Returns ``{"events": [...], "live": bool}``. When something is in the now
+    window, ``live`` is True. When nothing is (e.g. a lull, or before camp
+    starts), it falls back to the next upcoming events so the answer is still
+    useful, with ``live`` False.
+    """
+    now = now or now_local()
+    live = happening_now(events, now)
+    if live:
+        return {"events": live[:limit], "live": True}
+    return {"events": upcoming_events(events, now)[:limit], "live": False}
 
 
 def event_time(event: dict[str, Any]) -> str:
@@ -97,8 +276,18 @@ def event_time(event: dict[str, Any]) -> str:
 
 
 def event_day(event: dict[str, Any]) -> str:
-    """Return the calendar day (YYYY-MM-DD) for an event, or ``"?"``."""
-    return event.get("start_date") or "?"
+    """Return the weekday name (e.g. ``"Friday"``) for an event's day.
+
+    Camp is a single long weekend, so attendees think in weekdays, not dates.
+    Falls back to the raw date string, then ``"?"``.
+    """
+    raw = event.get("start_date")
+    if not raw:
+        return "?"
+    try:
+        return date.fromisoformat(raw).strftime("%A")
+    except ValueError:
+        return raw
 
 
 def event_venue(event: dict[str, Any]) -> str:
