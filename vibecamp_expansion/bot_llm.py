@@ -28,11 +28,13 @@ from .bot_api import (
     event_stars,
     event_time,
     event_venue,
+    events_on_day,
     future_filter,
     now_feed,
     now_local,
     truncate,
     upcoming_events,
+    weekday_index,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,11 +121,17 @@ spiritual"), a venue ("at the pool", "in the barn"), a host ("hosted by Atin", \
 Friday", "Saturday morning", "Thursday night"), or a specific thing ("shanties", \
 "tarot"). For this mode you choose the events.
 
-A named weekday (Thursday–Sunday) ALWAYS means "select": read each event's \
-`day` and `time` and pick the ones on that day (and time of day, if given), in \
-time order — even when phrased as "what's happening Friday" or "what's on \
-Saturday". Do NOT use "now" or "upcoming" when the guest names a weekday; those \
-ignore the day and would wrongly return the next events from right now.
+When the guest names a weekday (Thursday–Sunday), set `day` to that weekday \
+name (and `time_of_day` if they say morning/afternoon/evening/night) — the \
+system then lists that day's events for you, so you do NOT need to choose them \
+(leave `event_ids` empty). This applies even when phrased as "what's happening \
+Friday" or "what's on Saturday"; do NOT use "now"/"upcoming" for a named \
+weekday. Leave `day` empty when no weekday is named.
+
+CRITICAL for "select" (when you DO choose events): whenever matching events \
+exist, `event_ids` MUST contain their actual ids (up to 10). A `framing` \
+sentence is NOT a substitute for ids — never return an empty `event_ids` while \
+describing events in `framing`.
 
 For mode "select", put up to 10 matching event_ids in `event_ids`, best first. \
 Match on meaning, not just words — an AI fan should get "Let's Form a Hive \
@@ -166,6 +174,16 @@ _SCHEMA = {
             "description": "If the guest named a place, the EXACT venue string from "
             "the data to restrict to (e.g. 'Pool'); otherwise empty.",
         },
+        "day": {
+            "type": "string",
+            "description": "If the guest named a weekday (e.g. 'Friday'), that weekday "
+            "name; otherwise empty. When set, the system lists that day deterministically.",
+        },
+        "time_of_day": {
+            "type": "string",
+            "enum": ["", "morning", "afternoon", "evening", "night"],
+            "description": "If the guest named a time of day, the bucket; otherwise empty.",
+        },
         "framing": {
             "type": "string",
             "description": "One plain sentence introducing the picks, shown to the guest.",
@@ -176,7 +194,10 @@ _SCHEMA = {
             "description": "For mode 'select': chosen event_ids, best first, max 10.",
         },
     },
-    "required": ["interpretation", "mode", "sort", "framing", "event_ids"],
+    "required": [
+        "interpretation", "mode", "sort", "venue", "day", "time_of_day",
+        "framing", "event_ids",
+    ],
     "additionalProperties": False,
 }
 
@@ -282,7 +303,13 @@ async def smart_select(
         mode, sort, parsed.get("interpretation", ""),
     )
     framing = parsed.get("framing", "")
-    if mode == "now":
+    day = parsed.get("day", "").strip()
+    if day and weekday_index(day) is not None:
+        # Day-specific question: the model detected the weekday (and maybe a time
+        # of day); list that day deterministically rather than trusting the model
+        # to enumerate a busy day's events (which it does unreliably).
+        ordered = events_on_day(candidates, day, parsed.get("time_of_day", ""))[:_RESULT_LIMIT]
+    elif mode == "now":
         # The headline feature: events starting around right now. Falls back to
         # the next upcoming events when nothing's live, with honest framing the
         # model couldn't know to write (it can't see that the window is empty).

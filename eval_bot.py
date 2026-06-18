@@ -46,7 +46,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-async def _judge(query: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+async def _judge(query: str, events: list[dict[str, Any]], framing: str = "") -> dict[str, Any]:
     """Score relevance of a result set to the query via an independent LLM call."""
     from anthropic import AsyncAnthropic
 
@@ -77,13 +77,17 @@ async def _judge(query: str, events: list[dict[str, Any]]) -> dict[str, Any]:
             "currently-running events; use CURRENT_TIME to confirm the picks are "
             "the soonest upcoming ones in chronological order — do NOT penalise it "
             "for showing later days when little is on right now (camp is quiet at "
-            "some hours). For 'most popular' asks, check the stars column is high. "
+            "some hours). The bot also shows the guest a one-line FRAMING that "
+            "sets context (e.g. 'nothing's kicking off in the next half hour — "
+            "here's what's coming up next'); judge the listing together with that "
+            "framing, and don't penalise an honest fallback the framing explains. "
+            "For 'most popular' asks, check the stars column is high. "
             "For interests/venues, reward on-intent relevance and penalize "
             "off-topic or generic-popular filler.",
             messages=[{
                 "role": "user",
                 "content": f"CURRENT_TIME: {now_local().strftime('%A %Y-%m-%d %H:%M')} (Eastern)\n\n"
-                f"Guest asked: {query!r}\n\nBot returned:\n{listing}",
+                f"Guest asked: {query!r}\n\nFraming shown: {framing!r}\n\nBot returned:\n{listing}",
             }],
             output_config={"format": {"type": "json_schema", "schema": schema}},
         )
@@ -110,6 +114,7 @@ async def main() -> int:
         day_q = "what events are on Saturday?"
 
         results: dict[str, list[dict[str, Any]]] = {}
+        framings: dict[str, str] = {}
         for q in [
             next_q,
             ai_q,
@@ -123,6 +128,7 @@ async def main() -> int:
         ]:
             curated = await curate(api, q)
             results[q] = curated["events"]
+            framings[q] = curated["framing"]
             print(f"\n### {q}")
             print(f"    framing: {curated['framing']}")
             for e in curated["events"][:6]:
@@ -185,7 +191,7 @@ async def main() -> int:
         # --- LLM-judge checks -------------------------------------------- #
         print("\n=== LLM judge ===")
         for q, evs in results.items():
-            verdict = await _judge(q, evs)
+            verdict = await _judge(q, evs, framings.get(q, ""))
             ok = verdict["relevance"] >= 4 and verdict["fits_intent"]
             mark = "PASS" if ok else "FAIL"
             print(f"[{mark}] rel={verdict['relevance']} fits={verdict['fits_intent']} :: {q}")

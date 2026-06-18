@@ -15,11 +15,13 @@ from vibecamp_expansion.bot_api import (
     VibecampAPI,
     apply_sort,
     event_day,
+    events_on_day,
     future_filter,
     happening_now,
     is_future,
     now_feed,
     now_local,
+    weekday_index,
 )
 from vibecamp_expansion.telegram_bot import _HELP
 
@@ -122,6 +124,48 @@ def test_now_feed_falls_back_to_upcoming_when_nothing_live():
     feed = now_feed(events, NOW)
     assert feed["live"] is False
     assert [e["event_id"] for e in feed["events"]] == ["tonight", "later"]
+
+
+# --------------------------------------------------------------------------- #
+# Day listing (deterministic answer for "what's on Saturday")                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_weekday_index() -> None:
+    assert weekday_index("Friday") == 4
+    assert weekday_index("sat") == 5
+    assert weekday_index("Sunday") == 6
+    assert weekday_index("someday") is None
+
+
+def test_events_on_day_filters_to_weekday_sorted() -> None:
+    # 2026-06-19 = Friday, 2026-06-20 = Saturday.
+    events = [
+        ev("2026-06-20T15:00", eid="sat_pm"),
+        ev("2026-06-19T10:00", eid="fri"),
+        ev("2026-06-20T09:00", eid="sat_am"),
+    ]
+    got = [e["event_id"] for e in events_on_day(events, "Saturday")]
+    assert got == ["sat_am", "sat_pm"]  # only Saturday, soonest first
+
+
+def test_events_on_day_time_of_day_buckets() -> None:
+    events = [
+        ev("2026-06-20T07:00", eid="morning"),
+        ev("2026-06-20T14:00", eid="afternoon"),
+        ev("2026-06-20T19:00", eid="evening"),
+        ev("2026-06-20T22:30", eid="night"),
+        ev("2026-06-20T03:00", eid="predawn"),  # wee hours — not "Saturday night"
+    ]
+    assert [e["event_id"] for e in events_on_day(events, "Saturday", "morning")] == ["morning"]
+    assert [e["event_id"] for e in events_on_day(events, "Saturday", "afternoon")] == ["afternoon"]
+    assert [e["event_id"] for e in events_on_day(events, "Saturday", "evening")] == ["evening"]
+    # "night" is the day's late evening, not its post-midnight hours.
+    assert [e["event_id"] for e in events_on_day(events, "Saturday", "night")] == ["night"]
+
+
+def test_events_on_day_unknown_day_is_empty() -> None:
+    assert events_on_day([ev("2026-06-20T10:00")], "someday") == []
 
 
 # --------------------------------------------------------------------------- #

@@ -265,6 +265,52 @@ def now_feed(
     return {"events": upcoming_events(events, now)[:limit], "live": False}
 
 
+# Coarse time-of-day buckets by local hour on the named day. "night" is that
+# day's late evening (21:00+), not its post-midnight wee hours — "Friday night"
+# means Friday evening, not Friday 00:30.
+_TIME_OF_DAY = {
+    "morning": (5, 12),
+    "afternoon": (12, 17),
+    "evening": (17, 21),
+    "night": (21, 24),
+}
+
+
+def weekday_index(name: str) -> Optional[int]:
+    """Map a weekday name/abbreviation to 0=Mon..6=Sun, or None if unrecognised."""
+    return _WEEKDAY_ALIASES.get(name.strip().lower())
+
+
+def _in_time_of_day(hour: int, bucket: str) -> bool:
+    rng = _TIME_OF_DAY.get(bucket)
+    return rng is None or rng[0] <= hour < rng[1]
+
+
+def events_on_day(
+    events: list[dict[str, Any]],
+    day_name: str,
+    time_of_day: str = "",
+) -> list[dict[str, Any]]:
+    """Events on a given weekday (optionally a time-of-day bucket), soonest first.
+
+    The model *detects* the day/time from the guest's words; this lists it
+    deterministically — reliable where asking the model to enumerate a busy
+    day's 60 events is not. Returns [] if the weekday name isn't recognised.
+    """
+    wi = weekday_index(day_name)
+    if wi is None:
+        return []
+    tod = time_of_day.strip().lower()
+    matched = [
+        e
+        for e in events
+        if (s := event_start(e)) is not None
+        and s.weekday() == wi
+        and (not tod or _in_time_of_day(s.hour, tod))
+    ]
+    return sorted(matched, key=lambda e: event_start(e) or datetime.max)
+
+
 def event_time(event: dict[str, Any]) -> str:
     """Return ``HH:MM`` from an event's wall-clock start, or ``"??:??"``.
 
