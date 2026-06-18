@@ -40,7 +40,11 @@ from .bot_api import (
 from . import bot_llm
 from .analytics import Analytics
 from .bot_llm import curate
-from .ratelimit import SlidingWindowRateLimiter
+from .ratelimit import (
+    ExponentialLockout,
+    SlidingWindowRateLimiter,
+    TokenBucketRateLimiter,
+)
 
 # Usage analytics. Counts are in-memory by default (reset on redeploy) but
 # persist across restarts if VIBECAMP_ANALYTICS_PATH points at durable storage.
@@ -69,12 +73,15 @@ def _user_key(chat_id: int) -> str:
 
 logger = logging.getLogger(__name__)
 
-# Per-chat rate limit defaults: 10 messages per rolling 10-minute window.
-# Overridable via env in ``run()``. The limit protects the bot (and the paid
-# Anthropic LLM call behind each free-text reply) from a single spammer.
-_RATE_LIMIT_MAX = int(os.environ.get("TELEGRAM_RATE_LIMIT_MAX", "10"))
-_RATE_LIMIT_WINDOW_SECONDS = float(
-    os.environ.get("TELEGRAM_RATE_LIMIT_WINDOW_SECONDS", "600")
+# Per-chat burst limit (token bucket): a fresh chat may fire off
+# ``_RATE_LIMIT_BURST`` messages right away, after which it's paced to
+# ``_RATE_LIMIT_PER_MINUTE`` sustained — i.e. "a few up front, then a steady
+# trickle." Overridable via env in ``run()``. The limit protects the bot (and
+# the paid Anthropic LLM call behind each free-text reply) from a single
+# spammer.
+_RATE_LIMIT_BURST = int(os.environ.get("TELEGRAM_RATE_LIMIT_BURST", "3"))
+_RATE_LIMIT_PER_MINUTE = float(
+    os.environ.get("TELEGRAM_RATE_LIMIT_PER_MINUTE", "2")
 )
 
 # Second tier: a per-user daily cap (rolling 24h) on top of the burst limit
@@ -83,13 +90,25 @@ _RATE_LIMIT_WINDOW_SECONDS = float(
 _RATE_LIMIT_DAILY_MAX = int(os.environ.get("TELEGRAM_RATE_LIMIT_DAILY_MAX", "50"))
 _RATE_LIMIT_DAILY_WINDOW_SECONDS = 86_400.0
 
-# Don't re-send the "slow down" reply on every blocked update — once a chat is
-# over the limit it may keep firing. Send it at most once per this cooldown.
-_RATE_LIMIT_NOTICE_COOLDOWN_SECONDS = 60.0
+# Exponential lockout: when a chat blows past the burst limit it's put in a
+# penalty box, and each fresh overflow doubles the timeout (60s -> 2m -> 4m …)
+# up to the cap, so repeat offenders are locked out longer and longer. The
+# escalation resets once the chat behaves for ``_LOCKOUT_RESET_SECONDS`` past
+# the end of its last lockout. All overridable via env in ``run()``.
+_LOCKOUT_BASE_SECONDS = float(os.environ.get("TELEGRAM_LOCKOUT_BASE_SECONDS", "60"))
+_LOCKOUT_MAX_SECONDS = float(os.environ.get("TELEGRAM_LOCKOUT_MAX_SECONDS", "900"))
+_LOCKOUT_RESET_SECONDS = float(
+    os.environ.get("TELEGRAM_LOCKOUT_RESET_SECONDS", "3600")
+)
+
+# Once a chat is over the *daily* cap it may keep firing; don't re-send the
+# daily notice on every blocked update. Send it at most once per this cooldown.
+# (The burst lockout throttles its own notice — see the gate below.)
+_DAILY_NOTICE_COOLDOWN_SECONDS = 60.0
 
 _RATE_LIMITED_MESSAGE = (
-    "🏕️ You're moving fast! I can take about {max} questions every "
-    "{minutes} minutes — give me a couple of minutes and ask again."
+    "🏕️ Whoa, slow down a sec — you're asking faster than I can keep up! "
+    "Give me about {wait} and ask again, and I'll be right here."
 )
 
 _RATE_LIMITED_DAILY_MESSAGE = (
@@ -100,6 +119,16 @@ _RATE_LIMITED_DAILY_MESSAGE = (
 
 # Telegram's hard limit on a single message body.
 _MESSAGE_LIMIT = 4096
+
+
+def _humanize_seconds(seconds: float) -> str:
+    """Render a lockout duration as a friendly "N minute(s)" string.
+
+    Rounds to the nearest minute with a floor of one, so a sub-minute lockout
+    still reads as "1 minute" rather than "0 minutes."
+    """
+    minutes = max(1, round(seconds / 60))
+    return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
 
 # Pull the whole edition (it's small) so "most popular" ranks by stars *after*
 # dropping events that are already over, rather than letting the API's star-sort
@@ -198,10 +227,13 @@ def build_app(
     api: VibecampAPI,
     token: str,
     *,
-    rate_limit_max: int = _RATE_LIMIT_MAX,
-    rate_limit_window_seconds: float = _RATE_LIMIT_WINDOW_SECONDS,
+    rate_limit_burst: int = _RATE_LIMIT_BURST,
+    rate_limit_per_minute: float = _RATE_LIMIT_PER_MINUTE,
     rate_limit_daily_max: int = _RATE_LIMIT_DAILY_MAX,
     rate_limit_daily_window_seconds: float = _RATE_LIMIT_DAILY_WINDOW_SECONDS,
+    lockout_base_seconds: float = _LOCKOUT_BASE_SECONDS,
+    lockout_max_seconds: float = _LOCKOUT_MAX_SECONDS,
+    lockout_reset_seconds: float = _LOCKOUT_RESET_SECONDS,
     analytics_path: "str | None" = _ANALYTICS_PATH,
 ):
     """Construct the Telegram ``Application`` and register all handlers.
@@ -210,9 +242,10 @@ def build_app(
     so this module imports without python-telegram-bot installed (e.g. for
     byte-compile checks). The API client is closed on shutdown.
 
-    ``rate_limit_max`` / ``rate_limit_window_seconds`` configure the per-chat
-    sliding-window rate limit (default 10 messages / 600s); see the pre-check
-    handler below.
+    ``rate_limit_burst`` / ``rate_limit_per_minute`` configure the per-chat
+    burst token bucket (default 3 burst, 2/min sustained). A chat that exceeds
+    it is put in an exponential lockout (``lockout_*`` params); ``rate_limit_
+    daily_*`` is the per-chat daily backstop. See the pre-check handler below.
     """
     from telegram import Update
     from telegram.constants import ChatAction
@@ -226,12 +259,17 @@ def build_app(
         filters,
     )
 
-    # In-memory, per-chat limiter (fine for single-instance polling). When a
-    # chat is over the limit we reply once per cooldown and stop the update from
-    # reaching any real handler — so the paid LLM call never runs for a spammer.
-    limiter = SlidingWindowRateLimiter(rate_limit_max, rate_limit_window_seconds)
+    # In-memory, per-chat limiters (fine for single-instance polling). When a
+    # chat is over a limit we stop the update from reaching any real handler —
+    # so the paid LLM call never runs for a spammer. The burst tier is a token
+    # bucket (a few messages up front, then a steady trickle); blowing past it
+    # arms an exponential lockout. The daily tier is a 24h backstop.
+    limiter = TokenBucketRateLimiter(rate_limit_burst, rate_limit_per_minute)
     daily_limiter = SlidingWindowRateLimiter(
         rate_limit_daily_max, rate_limit_daily_window_seconds
+    )
+    lockout = ExponentialLockout(
+        lockout_base_seconds, lockout_max_seconds, lockout_reset_seconds
     )
     last_notice: dict[int, float] = {}
 
@@ -454,13 +492,34 @@ def build_app(
             "(Reverts to the default on redeploy.)",
         )
 
+    async def _send_notice(update, context: "ContextTypes.DEFAULT_TYPE", text: str) -> None:
+        """Best-effort reply for a rate-limit notice; never crashes the gate."""
+        message = update.effective_message
+        try:
+            if message is not None:
+                await message.reply_text(
+                    text, parse_mode="HTML", disable_web_page_preview=True
+                )
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+        except Exception:  # noqa: BLE001 — never let a notice failure crash the gate
+            logger.warning("Failed to send rate-limit notice", exc_info=True)
+
     async def _rate_limit_gate(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Pre-check every update against the per-chat rate limit.
 
         Registered in a lower group so it runs before any command/message
-        handler. If the chat is over the limit, reply (at most once per
-        cooldown) and raise ``ApplicationHandlerStop`` so the update never
-        reaches a real handler — crucially skipping the paid LLM call.
+        handler. If the chat is over a limit we raise ``ApplicationHandlerStop``
+        so the update never reaches a real handler — crucially skipping the paid
+        LLM call. The flow, in order:
+
+        1. Already in an exponential lockout -> drop silently (we already told
+           them, and the lockout doubles on the next *fresh* overflow, not on
+           every blocked message).
+        2. Out of burst tokens -> arm/escalate the lockout and send one friendly
+           "slow down for ~N min" notice.
+        3. Over the daily cap -> send the daily notice (throttled by cooldown).
+        4. Otherwise -> spend a token + a daily slot and proceed.
         """
         chat = update.effective_chat
         if chat is None:
@@ -469,43 +528,41 @@ def build_app(
         key = str(chat.id)
         user = _user_key(chat.id)
 
-        # Check both tiers without recording, so a block on one doesn't consume
-        # allowance on the other. Burst (short window) is checked first; the
-        # daily cap is the backstop against sustained, paced abuse.
-        if not limiter.would_allow(key, now):
-            minutes = max(1, round(rate_limit_window_seconds / 60))
-            text = _RATE_LIMITED_MESSAGE.format(max=rate_limit_max, minutes=minutes)
+        # 1. Inside an active lockout: count it, but stay quiet.
+        if lockout.is_locked(key, now):
             analytics.record_rate_limited(user)
-        elif not daily_limiter.would_allow(key, now):
-            text = _RATE_LIMITED_DAILY_MESSAGE.format(max=rate_limit_daily_max)
-            analytics.record_rate_limited(user)
-        else:
-            # Under both limits — record against both and proceed.
-            limiter.allow(key, now)
-            daily_limiter.allow(key, now)
-            # Analytics: classify the request and tally it.
-            raw = (update.effective_message.text or "") if update.effective_message else ""
-            kind = raw[1:].split()[0].lower() if raw.startswith("/") else "text"
-            is_new = analytics.record(user, kind or "text")
-            if is_new or analytics.total % _ANALYTICS_FLUSH_EVERY == 0:
-                _flush_analytics()
-            return
+            raise ApplicationHandlerStop
 
-        # Over a limit. Reply once per cooldown, then stop the update.
-        last = last_notice.get(chat.id)
-        if last is None or now - last >= _RATE_LIMIT_NOTICE_COOLDOWN_SECONDS:
-            last_notice[chat.id] = now
-            message = update.effective_message
-            try:
-                if message is not None:
-                    await message.reply_text(
-                        text, parse_mode="HTML", disable_web_page_preview=True
-                    )
-                else:
-                    await context.bot.send_message(chat_id=chat.id, text=text)
-            except Exception:  # noqa: BLE001 — never let a notice failure crash the gate
-                logger.warning("Failed to send rate-limit notice", exc_info=True)
-        raise ApplicationHandlerStop
+        # 2. Burst tier (peeked, not spent, so a block here doesn't consume the
+        #    daily allowance). Out of tokens -> escalating lockout.
+        if not limiter.would_allow(key, now):
+            analytics.record_rate_limited(user)
+            newly_armed, seconds = lockout.register(key, now)
+            if newly_armed:
+                text = _RATE_LIMITED_MESSAGE.format(wait=_humanize_seconds(seconds))
+                await _send_notice(update, context, text)
+            raise ApplicationHandlerStop
+
+        # 3. Daily backstop. Throttle the notice so a chat that's over its daily
+        #    cap (a 24h window) isn't reminded on every single message.
+        if not daily_limiter.would_allow(key, now):
+            analytics.record_rate_limited(user)
+            last = last_notice.get(chat.id)
+            if last is None or now - last >= _DAILY_NOTICE_COOLDOWN_SECONDS:
+                last_notice[chat.id] = now
+                text = _RATE_LIMITED_DAILY_MESSAGE.format(max=rate_limit_daily_max)
+                await _send_notice(update, context, text)
+            raise ApplicationHandlerStop
+
+        # 4. Under both limits — spend against both and proceed.
+        limiter.allow(key, now)
+        daily_limiter.allow(key, now)
+        # Analytics: classify the request and tally it.
+        raw = (update.effective_message.text or "") if update.effective_message else ""
+        kind = raw[1:].split()[0].lower() if raw.startswith("/") else "text"
+        is_new = analytics.record(user, kind or "text")
+        if is_new or analytics.total % _ANALYTICS_FLUSH_EVERY == 0:
+            _flush_analytics()
 
     async def _on_error(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         # One bad update must not take the bot down or spam unhandled tracebacks.
@@ -566,19 +623,24 @@ def run() -> int:
     app = build_app(
         api,
         token,
-        rate_limit_max=_RATE_LIMIT_MAX,
-        rate_limit_window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
+        rate_limit_burst=_RATE_LIMIT_BURST,
+        rate_limit_per_minute=_RATE_LIMIT_PER_MINUTE,
         rate_limit_daily_max=_RATE_LIMIT_DAILY_MAX,
         rate_limit_daily_window_seconds=_RATE_LIMIT_DAILY_WINDOW_SECONDS,
+        lockout_base_seconds=_LOCKOUT_BASE_SECONDS,
+        lockout_max_seconds=_LOCKOUT_MAX_SECONDS,
+        lockout_reset_seconds=_LOCKOUT_RESET_SECONDS,
         analytics_path=_ANALYTICS_PATH,
     )
 
     logger.info(
-        "Starting Vibe Camp Telegram bot against %s "
-        "(rate limit: %d msgs / %gs burst, %d msgs / day per chat)",
+        "Starting Vibe Camp Telegram bot against %s (rate limit: %d burst + "
+        "%g/min sustained, lockout %gs→%gs doubling, %d msgs / day per chat)",
         api_base,
-        _RATE_LIMIT_MAX,
-        _RATE_LIMIT_WINDOW_SECONDS,
+        _RATE_LIMIT_BURST,
+        _RATE_LIMIT_PER_MINUTE,
+        _LOCKOUT_BASE_SECONDS,
+        _LOCKOUT_MAX_SECONDS,
         _RATE_LIMIT_DAILY_MAX,
     )
     app.run_polling()
