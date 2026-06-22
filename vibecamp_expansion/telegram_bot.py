@@ -45,13 +45,22 @@ from .ratelimit import (
     SlidingWindowRateLimiter,
     TokenBucketRateLimiter,
 )
+from .userstore import UserStore
 
 # Usage analytics. Counts are in-memory by default (reset on redeploy) but
 # persist across restarts if VIBECAMP_ANALYTICS_PATH points at durable storage.
 _ANALYTICS_PATH = os.environ.get("VIBECAMP_ANALYTICS_PATH")
+# Durable user/subscriber store (real chat ids + opt-out) for /broadcast and
+# persistent audience tracking. Point at a path on a mounted volume to survive
+# redeploys; unset -> in-memory (resets, no broadcast audience persists).
+_USER_DB_PATH = os.environ.get("VIBECAMP_USER_DB", ":memory:")
 # Log a summary + persist every this many messages, so growth is visible in the
 # deploy logs even without anyone running /stats.
 _ANALYTICS_FLUSH_EVERY = 25
+# Throttle outbound broadcasts well under Telegram's ~30 msg/s global cap.
+_BROADCAST_SLEEP = 0.05
+# A pending /broadcast must be confirmed within this window.
+_BROADCAST_CONFIRM_TTL = 120.0
 # Admin allow-list for /stats. Configure by username (TELEGRAM_ADMIN_USERNAMES,
 # comma-separated, with or without a leading @) and/or numeric chat id
 # (TELEGRAM_ADMIN_IDS). If neither is set, /stats is open to anyone (it's cheap
@@ -235,6 +244,7 @@ def build_app(
     lockout_max_seconds: float = _LOCKOUT_MAX_SECONDS,
     lockout_reset_seconds: float = _LOCKOUT_RESET_SECONDS,
     analytics_path: "str | None" = _ANALYTICS_PATH,
+    user_db_path: str = _USER_DB_PATH,
 ):
     """Construct the Telegram ``Application`` and register all handlers.
 
@@ -277,6 +287,11 @@ def build_app(
     # durable path is configured, else fresh in-memory.
     analytics = Analytics.load(analytics_path) if analytics_path else Analytics()
 
+    # Durable audience/subscriber store (real chat ids) for broadcast + stats.
+    users = UserStore(user_db_path)
+    # Pending /broadcast awaiting the admin's confirm: {admin_chat_id: (text, ts)}.
+    pending_broadcast: dict[int, tuple[str, float]] = {}
+
     def _flush_analytics() -> None:
         """Log a summary and persist (if configured). Cheap; safe to call often."""
         s = analytics.summary()
@@ -289,6 +304,7 @@ def build_app(
 
     async def _post_shutdown(_app) -> None:
         await api.aclose()
+        users.close()
 
     async def _reply(update, text: str) -> None:
         await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
@@ -316,7 +332,18 @@ def build_app(
             pulse.cancel()
 
     async def start_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        # /start also (re)subscribes — the natural opt-in after a /stop.
+        if update.effective_chat is not None:
+            users.set_subscribed(update.effective_chat.id, True)
         await _reply(update, _HELP)
+
+    async def stop_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        if update.effective_chat is not None:
+            users.set_subscribed(update.effective_chat.id, False)
+        await _reply(
+            update,
+            "🤫 Muted — you won't get broadcast messages. Send /start anytime to turn them back on.",
+        )
 
     async def now_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         feed = now_feed(await _with_typing(update, api.search_events(sort="start", limit=_CANDIDATE_POOL)))
@@ -411,9 +438,11 @@ def build_app(
     async def _recommend_reply(update, interest: str) -> None:
         # The concierge call takes a few seconds (it now thinks) — show "typing…".
         curated = await _with_typing(update, curate(api, interest))
-        # Attribute the LLM call's estimated cost to this user for /stats.
+        # Attribute the LLM call's estimated cost (session + durable totals).
+        cost = curated.get("cost", 0.0)
         if update.effective_chat is not None:
-            analytics.record_cost(_user_key(update.effective_chat.id), curated.get("cost", 0.0))
+            analytics.record_cost(_user_key(update.effective_chat.id), cost)
+        users.add_cost(cost)
         results = curated["events"]
         if not results:
             await _reply(
@@ -446,26 +475,89 @@ def build_app(
             await _reply(update, _HELP)  # not an admin — treat like an unknown cmd
             return
         s = analytics.summary()
+        u = users.summary()
+        durable = user_db_path != ":memory:"
         lines = [
             "📊 <b>Bot usage</b>",
-            f"Unique users: <b>{s['unique_users']}</b>",
-            f"Total messages: <b>{s['total_messages']}</b> "
-            f"(avg {s['avg_queries_per_user']}/user)",
-            f"Est. spend: <b>${s['total_cost']:.2f}</b>",
-            f"Rate-limited: {s['rate_limited']}",
-            f"Model: {_esc(bot_llm.MODEL)}",
-            f"Uptime: {s['uptime_seconds'] / 3600:.1f}h",
+            f"<b>Audience (durable):</b> {u['users']} users · "
+            f"{u['subscribed']} subscribed · {u['opted_out']} muted",
+            f"Messages (all-time): <b>{u['messages']}</b> · spend ${u['total_cost']:.2f}",
+            "",
+            f"<b>This session:</b> {s['unique_users']} users · {s['total_messages']} msgs "
+            f"· ${s['total_cost']:.2f} · rate-limited {s['rate_limited']}",
+            f"Model: {_esc(bot_llm.MODEL)} · uptime {s['uptime_seconds'] / 3600:.1f}h",
         ]
         if s["by_kind"]:
             top = ", ".join(f"{k} {v}" for k, v in list(s["by_kind"].items())[:6])
             lines.append(f"By type: {_esc(top)}")
-        if s["top_users"]:
-            lines.append("Top users (id · queries · spend):")
-            for u in s["top_users"]:
-                lines.append(f"  {u['user'][:8]} · {u['queries']} · ${u['cost']:.2f}")
-        if not analytics_path:
-            lines.append("<i>(counts reset on redeploy — no durable store configured)</i>")
+        if not durable:
+            lines.append("<i>⚠️ no durable store — audience resets on redeploy (set VIBECAMP_USER_DB)</i>")
         await _reply(update, "\n".join(lines))
+
+    async def broadcast_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        """Admin-only: stage a verbatim message to all subscribers (needs confirm)."""
+        if not _is_admin(update) or update.effective_chat is None:
+            await _reply(update, _HELP)
+            return
+        text = update.message.text or ""
+        # Strip the leading "/broadcast " to get the verbatim message.
+        msg = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not msg:
+            await _reply(
+                update,
+                "Usage: /broadcast &lt;your message&gt;\n"
+                "I'll show a preview + recipient count; then /broadcast_confirm to send.",
+            )
+            return
+        n = len(users.subscriber_ids())
+        pending_broadcast[update.effective_chat.id] = (msg, time.time())
+        await _reply(
+            update,
+            f"📣 <b>Preview</b> — will send to <b>{n}</b> subscriber(s):\n\n{_esc(msg)}\n\n"
+            "Send /broadcast_confirm to deliver, or /broadcast_cancel to discard. "
+            f"(expires in {int(_BROADCAST_CONFIRM_TTL // 60)} min)",
+        )
+
+    async def broadcast_cancel_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        if not _is_admin(update) or update.effective_chat is None:
+            await _reply(update, _HELP)
+            return
+        pending_broadcast.pop(update.effective_chat.id, None)
+        await _reply(update, "Broadcast cancelled.")
+
+    async def broadcast_confirm_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
+        if not _is_admin(update) or update.effective_chat is None:
+            await _reply(update, _HELP)
+            return
+        pend = pending_broadcast.pop(update.effective_chat.id, None)
+        if pend is None:
+            await _reply(update, "Nothing staged. Use /broadcast &lt;message&gt; first.")
+            return
+        msg, ts = pend
+        if time.time() - ts > _BROADCAST_CONFIRM_TTL:
+            await _reply(update, "That broadcast expired — stage it again with /broadcast.")
+            return
+        body = f"{msg}\n\n<i>— reply /stop to mute these</i>"
+        recipients = users.subscriber_ids()
+        sent = failed = removed = 0
+        for chat_id in recipients:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id, text=body, parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                sent += 1
+            except Exception as exc:  # noqa: BLE001 — keep going past dead chats
+                # A user who blocked/deleted the bot -> drop them from the audience.
+                if "bot was blocked" in str(exc).lower() or "deactivated" in str(exc).lower():
+                    users.set_subscribed(chat_id, False)
+                    removed += 1
+                else:
+                    failed += 1
+                    logger.warning("broadcast to %s failed: %s", chat_id, exc)
+            await asyncio.sleep(_BROADCAST_SLEEP)
+        logger.info("broadcast: sent=%d failed=%d removed=%d of %d", sent, failed, removed, len(recipients))
+        await _reply(update, f"✅ Sent to {sent}. (failed {failed}, muted-dead {removed})")
 
     async def model_cmd(update, context: "ContextTypes.DEFAULT_TYPE") -> None:
         """Switch the concierge model at runtime (admin only). e.g. /model haiku."""
@@ -561,6 +653,9 @@ def build_app(
         raw = (update.effective_message.text or "") if update.effective_message else ""
         kind = raw[1:].split()[0].lower() if raw.startswith("/") else "text"
         is_new = analytics.record(user, kind or "text")
+        # Durable audience tracking: enrol the real chat id (opt-out model).
+        uname = update.effective_user.username if update.effective_user else None
+        users.seen(chat.id, uname, now=now)
         if is_new or analytics.total % _ANALYTICS_FLUSH_EVERY == 0:
             _flush_analytics()
 
@@ -593,8 +688,12 @@ def build_app(
     app.add_handler(CommandHandler("popular", popular_cmd))
     app.add_handler(CommandHandler("recommend", recommend_cmd))
     app.add_handler(CommandHandler("event", event_cmd))
+    app.add_handler(CommandHandler("stop", stop_cmd))    # opt out of broadcasts
     app.add_handler(CommandHandler("stats", stats_cmd))  # usage analytics (undocumented)
     app.add_handler(CommandHandler("model", model_cmd))  # admin: switch concierge model
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))            # admin: stage a broadcast
+    app.add_handler(CommandHandler("broadcast_confirm", broadcast_confirm_cmd))
+    app.add_handler(CommandHandler("broadcast_cancel", broadcast_cancel_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     return app
 
@@ -631,17 +730,20 @@ def run() -> int:
         lockout_max_seconds=_LOCKOUT_MAX_SECONDS,
         lockout_reset_seconds=_LOCKOUT_RESET_SECONDS,
         analytics_path=_ANALYTICS_PATH,
+        user_db_path=_USER_DB_PATH,
     )
 
     logger.info(
         "Starting Vibe Camp Telegram bot against %s (rate limit: %d burst + "
-        "%g/min sustained, lockout %gs→%gs doubling, %d msgs / day per chat)",
+        "%g/min sustained, lockout %gs→%gs doubling, %d msgs / day per chat) "
+        "user_db=%s",
         api_base,
         _RATE_LIMIT_BURST,
         _RATE_LIMIT_PER_MINUTE,
         _LOCKOUT_BASE_SECONDS,
         _LOCKOUT_MAX_SECONDS,
         _RATE_LIMIT_DAILY_MAX,
+        "(durable)" if _USER_DB_PATH != ":memory:" else "(in-memory)",
     )
     app.run_polling()
     return 0
